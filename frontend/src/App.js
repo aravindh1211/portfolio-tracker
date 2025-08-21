@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { PlusCircle, Edit, Trash2, RefreshCw, TrendingUp, TrendingDown, DollarSign, PieChart, Download, Sun, Moon } from 'lucide-react';
 
 const API_BASE = process.env.NODE_ENV === 'production' 
-  ? 'https://your-app-name.onrender.com' 
+  ? 'https://portfolio-tracker-backend-st89.onrender.com' 
   : 'http://localhost:8000';
 
 function App() {
@@ -579,5 +579,6 @@ function App() {
     </div>
   );
 }
+
 
 export default App;
