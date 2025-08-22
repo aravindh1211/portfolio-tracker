@@ -7,34 +7,30 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Depends, Security, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from jose import jwt, JWTError
 from pydantic import BaseModel, computed_field
 import requests
 import yfinance as yf
 import pandas as pd
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Text, ForeignKey, Uuid
 from sqlalchemy.orm import sessionmaker, Session, declarative_base, relationship
+from supabase import create_client, Client
 
 # --- CONFIGURATION & ENVIRONMENT VARIABLES ---
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./portfolio.db")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
-JWT_SECRET = os.getenv("JWT_SECRET") # Supabase provides this in API settings
 
-if not JWT_SECRET and SUPABASE_KEY:
-    # In Supabase, the public key (anon key) can sometimes be used for basic validation, 
-    # but the proper JWT secret is found in Dashboard -> Settings -> API -> JWT Settings
-    print("Warning: JWT_SECRET not set. Using SUPABASE_KEY as a fallback. For production, please set the JWT_SECRET from your Supabase project settings.")
-    JWT_SECRET = SUPABASE_KEY
-
-# --- DATABASE SETUP ---
+# --- DATABASE & SUPABASE CLIENT SETUP ---
 engine = create_engine(
     DATABASE_URL,
     connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {}
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
+# Initialize Supabase client
+supabase_client: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # --- DATABASE MODELS ---
 class Investment(Base):
@@ -89,14 +85,14 @@ class User(BaseModel):
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Security(security)) -> User:
     token = credentials.credentials
     try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"], audience="authenticated")
-        user_id = payload.get("sub")
+        # Use the Supabase client to verify the token and get the user
+        user_response = supabase_client.auth.get_user(token)
+        user_id = user_response.user.id
         if user_id is None:
             raise HTTPException(status_code=401, detail="Invalid authentication credentials")
-        return User(id=user_id)
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Could not validate credentials")
+        return User(id=str(user_id))
     except Exception:
+        # If get_user fails, the token is invalid
         raise HTTPException(status_code=401, detail="Could not validate credentials")
 
 
@@ -109,7 +105,6 @@ class APIService:
         if self._usdinr_rate and self._usdinr_last_update and (datetime.utcnow() - self._usdinr_last_update).seconds < 3600:
             return self._usdinr_rate
         try:
-            # Using a reliable free API for exchange rates
             response = requests.get("https://api.exchangerate-api.com/v4/latest/USD")
             response.raise_for_status()
             self._usdinr_rate = response.json()['rates']['INR']
@@ -117,19 +112,17 @@ class APIService:
             return self._usdinr_rate
         except Exception as e:
             print(f"Error fetching USD/INR rate: {e}. Using fallback rate of 83.0")
-            return 83.0 # Fallback rate
+            return 83.0
 
     async def get_price(self, asset_type: str, ticker: str) -> float:
         try:
-            # yfinance is still good for stocks/MFs
             stock = yf.Ticker(ticker)
             hist = stock.history(period="1d")
             if not hist.empty:
                 return float(hist['Close'].iloc[-1])
             return 0.0
         except Exception:
-            # Fallback for stocks can be Finnhub
-            if asset_type.lower() in ["stock", "us equity", "ind equity"]:
+            if asset_type.lower() in ["stock", "us equity", "ind equity"] and FINNHUB_API_KEY:
                 try:
                     res = requests.get(f'https://finnhub.io/api/v1/quote?symbol={ticker}&token={FINNHUB_API_KEY}')
                     res.raise_for_status()
@@ -152,7 +145,7 @@ class APIService:
 
 api_service = APIService()
 
-# --- PYDANTIC MODELS ---
+# --- PYDANTIC MODELS (unchanged from previous version) ---
 class CategoryBase(BaseModel):
     name: str
 
@@ -211,7 +204,6 @@ class InvestmentResponse(InvestmentBase):
     @computed_field
     @property
     def total_value_inr(self) -> float:
-        # This will be calculated on the fly in the endpoint
         return 0.0
     
     @computed_field
@@ -329,8 +321,6 @@ def create_subcategory(subcategory: SubCategoryCreate, db: Session = Depends(get
     db.refresh(db_subcategory)
     return db_subcategory
 
-# ... Add PUT/DELETE for categories/subcategories if needed ...
-
 # --- ALLOCATION GOALS ---
 @app.get("/api/allocation-goals", response_model=List[AllocationGoalInDB])
 def get_allocation_goals(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
@@ -339,7 +329,6 @@ def get_allocation_goals(db: Session = Depends(get_db), user: User = Depends(get
 
 @app.post("/api/allocation-goals")
 def set_allocation_goals(goals: List[AllocationGoalCreate], db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    # Simple approach: delete old goals, insert new ones
     db.query(AllocationGoal).filter(AllocationGoal.user_id == user.id).delete()
     for goal in goals:
         db_goal = AllocationGoal(user_id=user.id, category_id=goal.category_id, percentage=goal.percentage)
@@ -447,11 +436,10 @@ async def get_portfolio_news(db: Session = Depends(get_db), user: User = Depends
     unique_tickers = list(set([inv.ticker for inv in investments]))
     
     all_news = []
-    for ticker in unique_tickers[:10]: # Limit to 10 to avoid rate limits
+    for ticker in unique_tickers[:10]:
         news_items = await api_service.get_news(ticker)
         if news_items:
-            # Add ticker to each news item for frontend grouping
-            for item in news_items[:5]: # Max 5 news per ticker
+            for item in news_items[:5]:
                 item['ticker'] = ticker
                 all_news.append(item)
     
@@ -466,17 +454,7 @@ async def bulk_upload_investments(file: UploadFile = File(...), db: Session = De
             raise HTTPException(status_code=400, detail=f"Missing required columns in Excel file. Required: {required_columns}")
 
         for _, row in df.iterrows():
-            inv_data = InvestmentCreate(
-                asset_type=row['asset_type'],
-                ticker=row['ticker'],
-                name=row['name'],
-                units=row['units'],
-                currency=row['currency'],
-                avg_buy_price_native=row['avg_buy_price_native'],
-                conviction_level=row['conviction_level'],
-                purchase_date=pd.to_datetime(row['purchase_date'])
-            )
-            # Create the investment record
+            inv_data = InvestmentCreate(**row.to_dict())
             await create_investment(inv_data, db, user)
 
     except Exception as e:
@@ -484,11 +462,8 @@ async def bulk_upload_investments(file: UploadFile = File(...), db: Session = De
 
     return {"message": f"Successfully processed {len(df)} records from the uploaded file."}
 
-
 # --- MAIN EXECUTION ---
 if __name__ == "__main__":
     import uvicorn
-    # This part is for local development, Render uses the start command directly.
     port = int(os.environ.get("PORT", 8000))
-    # Note: Render's start command should be: uvicorn backend.main:app --host 0.0.0.0 --port 8000
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
