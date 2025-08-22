@@ -1,24 +1,34 @@
-from fastapi import FastAPI, HTTPException, Depends
-from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Text
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
-from pydantic import BaseModel
-from datetime import datetime, timedelta
-from typing import List, Optional
-import yfinance as yf
-import requests
 import os
 import asyncio
+from datetime import datetime, timedelta
+from typing import List, Optional
 from contextlib import asynccontextmanager
 
-# Environment variables for Supabase
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://username:password@host:port/database")
+from fastapi import FastAPI, HTTPException, Depends, Security, UploadFile, File
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from jose import jwt, JWTError
+from pydantic import BaseModel, computed_field
+import requests
+import yfinance as yf
+import pandas as pd
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Text, ForeignKey, Uuid
+from sqlalchemy.orm import sessionmaker, Session, declarative_base, relationship
 
-# For local development, use SQLite as fallback
-if "postgresql://" not in DATABASE_URL:
-    DATABASE_URL = "sqlite:///./portfolio.db"
+# --- CONFIGURATION & ENVIRONMENT VARIABLES ---
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./portfolio.db")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
+JWT_SECRET = os.getenv("JWT_SECRET") # Supabase provides this in API settings
 
+if not JWT_SECRET and SUPABASE_KEY:
+    # In Supabase, the public key (anon key) can sometimes be used for basic validation, 
+    # but the proper JWT secret is found in Dashboard -> Settings -> API -> JWT Settings
+    print("Warning: JWT_SECRET not set. Using SUPABASE_KEY as a fallback. For production, please set the JWT_SECRET from your Supabase project settings.")
+    JWT_SECRET = SUPABASE_KEY
+
+# --- DATABASE SETUP ---
 engine = create_engine(
     DATABASE_URL,
     connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {}
@@ -26,146 +36,207 @@ engine = create_engine(
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# Database Models
+# --- DATABASE MODELS ---
 class Investment(Base):
     __tablename__ = "investments"
-    
     id = Column(Integer, primary_key=True, index=True)
-    asset_type = Column(String, nullable=False)  # Stock, Crypto, Mutual Fund
+    user_id = Column(Uuid, nullable=False, index=True)
+    asset_type = Column(String, nullable=False)
     ticker = Column(String, nullable=False, index=True)
     name = Column(String, nullable=False)
     units = Column(Float, nullable=False)
-    avg_buy_price = Column(Float, nullable=False)
-    current_price = Column(Float, default=0.0)
+    currency = Column(String, default="INR", nullable=False)
+    avg_buy_price_native = Column(Float, nullable=False)
+    current_price_native = Column(Float, default=0.0)
     investment_thesis = Column(Text)
-    conviction_level = Column(String, nullable=False)  # High, Medium, Low
+    conviction_level = Column(String, nullable=False)
     purchase_date = Column(DateTime, nullable=False)
     last_price_update = Column(DateTime, default=datetime.utcnow)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    category_id = Column(Integer, ForeignKey("categories.id"))
+    subcategory_id = Column(Integer, ForeignKey("subcategories.id"))
+    category = relationship("Category")
+    subcategory = relationship("SubCategory")
 
-# Create tables
-Base.metadata.create_all(bind=engine)
+class Category(Base):
+    __tablename__ = "categories"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Uuid, nullable=False)
+    name = Column(String, nullable=False, index=True)
+    subcategories = relationship("SubCategory", back_populates="category", cascade="all, delete-orphan")
 
-# Pydantic models
-class InvestmentCreate(BaseModel):
-    asset_type: str
-    ticker: str
-    name: str
-    units: float
-    avg_buy_price: float
-    investment_thesis: Optional[str] = ""
-    conviction_level: str
-    purchase_date: datetime
+class SubCategory(Base):
+    __tablename__ = "subcategories"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Uuid, nullable=False)
+    name = Column(String, nullable=False, index=True)
+    category_id = Column(Integer, ForeignKey("categories.id"))
+    category = relationship("Category", back_populates="subcategories")
 
-class InvestmentUpdate(BaseModel):
-    units: Optional[float] = None
-    avg_buy_price: Optional[float] = None
-    investment_thesis: Optional[str] = None
-    conviction_level: Optional[str] = None
+class AllocationGoal(Base):
+    __tablename__ = "allocation_goals"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Uuid, nullable=False)
+    category_id = Column(Integer, ForeignKey("categories.id"))
+    percentage = Column(Float, nullable=False)
+    category = relationship("Category")
 
-class InvestmentResponse(BaseModel):
-    id: int
-    asset_type: str
-    ticker: str
-    name: str
-    units: float
-    avg_buy_price: float
-    current_price: float
-    investment_thesis: str
-    conviction_level: str
-    purchase_date: datetime
-    last_price_update: datetime
-    total_value: float
-    unrealized_pnl: float
-    unrealized_pnl_percent: float
+# --- AUTHENTICATION ---
+security = HTTPBearer()
 
-    class Config:
-        from_attributes = True
+class User(BaseModel):
+    id: str
 
-class PortfolioStats(BaseModel):
-    total_invested: float
-    current_value: float
-    net_return_percent: float
-    total_unrealized_pnl: float
-    high_conviction_count: int
-    medium_conviction_count: int
-    low_conviction_count: int
-    total_holdings: int
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Security(security)) -> User:
+    token = credentials.credentials
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"], audience="authenticated")
+        user_id = payload.get("sub")
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid authentication credentials")
+        return User(id=user_id)
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Could not validate credentials")
+    except Exception:
+        raise HTTPException(status_code=401, detail="Could not validate credentials")
 
-# Price fetching service
-class PriceFetcher:
-    @staticmethod
-    async def get_stock_price(ticker: str) -> float:
-        """Fetch stock price using yfinance (supports Indian and US stocks)"""
+
+# --- EXTERNAL API SERVICES ---
+class APIService:
+    _usdinr_rate = None
+    _usdinr_last_update = None
+
+    async def get_usdinr_rate(self) -> float:
+        if self._usdinr_rate and self._usdinr_last_update and (datetime.utcnow() - self._usdinr_last_update).seconds < 3600:
+            return self._usdinr_rate
         try:
+            # Using a reliable free API for exchange rates
+            response = requests.get("https://api.exchangerate-api.com/v4/latest/USD")
+            response.raise_for_status()
+            self._usdinr_rate = response.json()['rates']['INR']
+            self._usdinr_last_update = datetime.utcnow()
+            return self._usdinr_rate
+        except Exception as e:
+            print(f"Error fetching USD/INR rate: {e}. Using fallback rate of 83.0")
+            return 83.0 # Fallback rate
+
+    async def get_price(self, asset_type: str, ticker: str) -> float:
+        try:
+            # yfinance is still good for stocks/MFs
             stock = yf.Ticker(ticker)
             hist = stock.history(period="1d")
             if not hist.empty:
                 return float(hist['Close'].iloc[-1])
             return 0.0
-        except Exception as e:
-            print(f"Error fetching stock price for {ticker}: {e}")
+        except Exception:
+            # Fallback for stocks can be Finnhub
+            if asset_type.lower() in ["stock", "us equity", "ind equity"]:
+                try:
+                    res = requests.get(f'https://finnhub.io/api/v1/quote?symbol={ticker}&token={FINNHUB_API_KEY}')
+                    res.raise_for_status()
+                    return res.json().get('c', 0.0)
+                except Exception as e:
+                    print(f"Finnhub fallback failed for {ticker}: {e}")
             return 0.0
-
-    @staticmethod
-    async def get_crypto_price(ticker: str) -> float:
-        """Fetch crypto price using CoinGecko free API"""
+    
+    async def get_news(self, ticker: str) -> List[dict]:
+        if not FINNHUB_API_KEY: return []
+        today = datetime.now().strftime('%Y-%m-%d')
+        one_month_ago = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
         try:
-            # Convert ticker format (BTC-USD -> bitcoin)
-            crypto_map = {
-                'BTC-USD': 'bitcoin',
-                'ETH-USD': 'ethereum',
-                'ADA-USD': 'cardano',
-                'DOT-USD': 'polkadot',
-                'MATIC-USD': 'matic-network',
-                'SOL-USD': 'solana',
-                'AVAX-USD': 'avalanche-2',
-                'LINK-USD': 'chainlink',
-                'UNI-USD': 'uniswap',
-                'ATOM-USD': 'cosmos'
-            }
-            
-            crypto_id = crypto_map.get(ticker, ticker.lower().replace('-usd', ''))
-            
-            url = f"https://api.coingecko.com/api/v3/simple/price?ids={crypto_id}&vs_currencies=usd"
-            response = requests.get(url, timeout=10)
-            
-            if response.status_code == 200:
-                data = response.json()
-                if crypto_id in data:
-                    return float(data[crypto_id]['usd'])
-            return 0.0
+            res = requests.get(f'https://finnhub.io/api/v1/company-news?symbol={ticker}&from={one_month_ago}&to={today}&token={FINNHUB_API_KEY}')
+            res.raise_for_status()
+            return res.json()
         except Exception as e:
-            print(f"Error fetching crypto price for {ticker}: {e}")
-            return 0.0
+            print(f"Error fetching news for {ticker}: {e}")
+            return []
 
-    @staticmethod
-    async def get_mutual_fund_price(ticker: str) -> float:
-        """Fetch mutual fund price using yfinance"""
-        return await PriceFetcher.get_stock_price(ticker)
+api_service = APIService()
 
-    @staticmethod
-    async def get_price(asset_type: str, ticker: str) -> float:
-        """Universal price fetcher"""
-        if asset_type.lower() == "crypto":
-            return await PriceFetcher.get_crypto_price(ticker)
-        elif asset_type.lower() in ["stock", "mutual fund"]:
-            return await PriceFetcher.get_stock_price(ticker)
+# --- PYDANTIC MODELS ---
+class CategoryBase(BaseModel):
+    name: str
+
+class CategoryCreate(CategoryBase): pass
+
+class SubCategoryInDB(CategoryBase):
+    id: int
+    class Config: from_attributes = True
+
+class CategoryInDB(CategoryBase):
+    id: int
+    subcategories: List[SubCategoryInDB] = []
+    class Config: from_attributes = True
+
+class SubCategoryCreate(CategoryBase):
+    category_id: int
+
+class AllocationGoalCreate(BaseModel):
+    category_id: int
+    percentage: float
+
+class AllocationGoalInDB(BaseModel):
+    id: int
+    category_id: int
+    percentage: float
+    category_name: str
+    class Config: from_attributes = True
+
+class InvestmentBase(BaseModel):
+    asset_type: str
+    ticker: str
+    name: str
+    units: float
+    currency: str = 'INR'
+    avg_buy_price_native: float
+    conviction_level: str
+    purchase_date: datetime
+    investment_thesis: Optional[str] = ""
+    category_id: Optional[int] = None
+    subcategory_id: Optional[int] = None
+
+class InvestmentCreate(InvestmentBase): pass
+class InvestmentUpdate(BaseModel):
+    units: Optional[float] = None
+    avg_buy_price_native: Optional[float] = None
+    conviction_level: Optional[str] = None
+    investment_thesis: Optional[str] = None
+    category_id: Optional[int] = None
+    subcategory_id: Optional[int] = None
+
+class InvestmentResponse(InvestmentBase):
+    id: int
+    current_price_native: float
+    last_price_update: datetime
+    
+    @computed_field
+    @property
+    def total_value_inr(self) -> float:
+        # This will be calculated on the fly in the endpoint
+        return 0.0
+    
+    @computed_field
+    @property
+    def unrealized_pnl_inr(self) -> float:
         return 0.0
 
-# Background task for price updates
+    @computed_field
+    @property
+    def unrealized_pnl_percent(self) -> float:
+        return 0.0
+
+    class Config: from_attributes = True
+
+
+# --- BACKGROUND TASK ---
 async def update_all_prices():
-    """Background task to update all investment prices"""
     db = SessionLocal()
     try:
         investments = db.query(Investment).all()
         for investment in investments:
-            # Only update if price is older than 15 minutes
-            if (datetime.utcnow() - investment.last_price_update).seconds > 900:
-                new_price = await PriceFetcher.get_price(investment.asset_type, investment.ticker)
+            if (datetime.utcnow() - investment.last_price_update).seconds > 900: # 15 mins
+                new_price = await api_service.get_price(investment.asset_type, investment.ticker)
                 if new_price > 0:
-                    investment.current_price = new_price
+                    investment.current_price_native = new_price
                     investment.last_price_update = datetime.utcnow()
         db.commit()
     except Exception as e:
@@ -174,45 +245,35 @@ async def update_all_prices():
     finally:
         db.close()
 
-# Lifespan management
+# --- APP LIFESPAN ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
-    print("Portfolio Tracker API starting up...")
-    
-    # Create background task for price updates
+    print("API starting up...")
     async def price_update_loop():
         while True:
             await update_all_prices()
-            await asyncio.sleep(900)  # Wait 15 minutes
-    
-    # Start background task
+            await asyncio.sleep(900)
     task = asyncio.create_task(price_update_loop())
-    
     yield
-    
-    # Shutdown
     task.cancel()
-    print("Portfolio Tracker API shutting down...")
+    print("API shutting down...")
 
-# FastAPI app
+# --- FASTAPI APP ---
 app = FastAPI(
-    title="Personal Investment Portfolio Tracker",
-    description="Track your investments across Indian Stocks, US Stocks, Cryptocurrencies, and Mutual Funds",
-    version="1.0.0",
+    title="Portfolio Tracker API v2.0",
+    description="Advanced portfolio tracker with user auth and multi-currency support.",
+    version="2.0.0",
     lifespan=lifespan
 )
 
-# CORS middleware - Allow all origins for cloud deployment
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with specific domains
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Dependency to get database session
 def get_db():
     db = SessionLocal()
     try:
@@ -220,162 +281,214 @@ def get_db():
     finally:
         db.close()
 
-# Helper function to calculate investment metrics
-def calculate_metrics(investment: Investment) -> dict:
-    total_value = investment.units * investment.current_price
-    total_invested = investment.units * investment.avg_buy_price
-    unrealized_pnl = total_value - total_invested
-    unrealized_pnl_percent = (unrealized_pnl / total_invested * 100) if total_invested > 0 else 0
+# --- HELPER FUNCTIONS ---
+async def calculate_investment_metrics(investment: Investment, usdinr_rate: float) -> dict:
+    current_value_native = investment.units * investment.current_price_native
+    total_invested_native = investment.units * investment.avg_buy_price_native
     
+    if investment.currency.upper() == 'USD':
+        total_value_inr = current_value_native * usdinr_rate
+        total_invested_inr = total_invested_native * usdinr_rate
+    else: # INR
+        total_value_inr = current_value_native
+        total_invested_inr = total_invested_native
+
+    unrealized_pnl_inr = total_value_inr - total_invested_inr
+    pnl_percent = (unrealized_pnl_inr / total_invested_inr * 100) if total_invested_inr > 0 else 0
+
     return {
-        "total_value": total_value,
-        "unrealized_pnl": unrealized_pnl,
-        "unrealized_pnl_percent": unrealized_pnl_percent
+        "total_value_inr": total_value_inr,
+        "unrealized_pnl_inr": unrealized_pnl_inr,
+        "unrealized_pnl_percent": pnl_percent,
     }
 
-# API Routes
+# --- API ROUTES ---
+
 @app.get("/")
-async def root():
-    return {"message": "Personal Investment Portfolio Tracker API", "version": "1.0.0", "status": "running"}
+def root():
+    return {"message": "Portfolio Tracker API v2.0", "status": "running"}
 
-@app.get("/health")
-async def health_check():
-    """Health check endpoint for cloud deployment"""
-    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
+# --- CATEGORIES & SUBCATEGORIES ---
+@app.get("/api/categories", response_model=List[CategoryInDB])
+def get_categories(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return db.query(Category).filter(Category.user_id == user.id).all()
 
+@app.post("/api/categories", response_model=CategoryInDB)
+def create_category(category: CategoryCreate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    db_category = Category(**category.dict(), user_id=user.id)
+    db.add(db_category)
+    db.commit()
+    db.refresh(db_category)
+    return db_category
+
+@app.post("/api/subcategories", response_model=SubCategoryInDB)
+def create_subcategory(subcategory: SubCategoryCreate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    db_subcategory = SubCategory(**subcategory.dict(), user_id=user.id)
+    db.add(db_subcategory)
+    db.commit()
+    db.refresh(db_subcategory)
+    return db_subcategory
+
+# ... Add PUT/DELETE for categories/subcategories if needed ...
+
+# --- ALLOCATION GOALS ---
+@app.get("/api/allocation-goals", response_model=List[AllocationGoalInDB])
+def get_allocation_goals(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    goals = db.query(AllocationGoal).filter(AllocationGoal.user_id == user.id).all()
+    return [{"id": g.id, "category_id": g.category_id, "percentage": g.percentage, "category_name": g.category.name} for g in goals]
+
+@app.post("/api/allocation-goals")
+def set_allocation_goals(goals: List[AllocationGoalCreate], db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    # Simple approach: delete old goals, insert new ones
+    db.query(AllocationGoal).filter(AllocationGoal.user_id == user.id).delete()
+    for goal in goals:
+        db_goal = AllocationGoal(user_id=user.id, category_id=goal.category_id, percentage=goal.percentage)
+        db.add(db_goal)
+    db.commit()
+    return {"message": "Allocation goals updated successfully"}
+
+# --- INVESTMENTS ---
 @app.get("/api/investments", response_model=List[InvestmentResponse])
-async def get_investments(db: Session = Depends(get_db)):
-    investments = db.query(Investment).all()
-    result = []
+async def get_investments(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    investments = db.query(Investment).filter(Investment.user_id == user.id).all()
+    usdinr_rate = await api_service.get_usdinr_rate()
     
-    for investment in investments:
-        metrics = calculate_metrics(investment)
-        result.append(InvestmentResponse(
-            id=investment.id,
-            asset_type=investment.asset_type,
-            ticker=investment.ticker,
-            name=investment.name,
-            units=investment.units,
-            avg_buy_price=investment.avg_buy_price,
-            current_price=investment.current_price,
-            investment_thesis=investment.investment_thesis or "",
-            conviction_level=investment.conviction_level,
-            purchase_date=investment.purchase_date,
-            last_price_update=investment.last_price_update,
-            **metrics
-        ))
-    
-    return result
+    response = []
+    for inv in investments:
+        metrics = await calculate_investment_metrics(inv, usdinr_rate)
+        inv_dict = inv.__dict__
+        inv_dict.update(metrics)
+        response.append(InvestmentResponse.model_validate(inv_dict))
+    return response
 
 @app.post("/api/investments", response_model=InvestmentResponse)
-async def create_investment(investment: InvestmentCreate, db: Session = Depends(get_db)):
-    # Fetch current price
-    current_price = await PriceFetcher.get_price(investment.asset_type, investment.ticker)
-    
+async def create_investment(investment: InvestmentCreate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    current_price = await api_service.get_price(investment.asset_type, investment.ticker)
     db_investment = Investment(
-        **investment.dict(),
-        current_price=current_price,
-        last_price_update=datetime.utcnow()
+        **investment.dict(), 
+        user_id=user.id,
+        current_price_native=current_price
     )
-    
     db.add(db_investment)
     db.commit()
     db.refresh(db_investment)
-    
-    metrics = calculate_metrics(db_investment)
-    return InvestmentResponse(
-        id=db_investment.id,
-        asset_type=db_investment.asset_type,
-        ticker=db_investment.ticker,
-        name=db_investment.name,
-        units=db_investment.units,
-        avg_buy_price=db_investment.avg_buy_price,
-        current_price=db_investment.current_price,
-        investment_thesis=db_investment.investment_thesis or "",
-        conviction_level=db_investment.conviction_level,
-        purchase_date=db_investment.purchase_date,
-        last_price_update=db_investment.last_price_update,
-        **metrics
-    )
+
+    usdinr_rate = await api_service.get_usdinr_rate()
+    metrics = await calculate_investment_metrics(db_investment, usdinr_rate)
+    inv_dict = db_investment.__dict__
+    inv_dict.update(metrics)
+    return InvestmentResponse.model_validate(inv_dict)
 
 @app.put("/api/investments/{investment_id}", response_model=InvestmentResponse)
-async def update_investment(
-    investment_id: int, 
-    investment_update: InvestmentUpdate, 
-    db: Session = Depends(get_db)
-):
-    db_investment = db.query(Investment).filter(Investment.id == investment_id).first()
+async def update_investment(investment_id: int, investment_data: InvestmentUpdate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    db_investment = db.query(Investment).filter(Investment.id == investment_id, Investment.user_id == user.id).first()
     if not db_investment:
         raise HTTPException(status_code=404, detail="Investment not found")
     
-    # Update fields
-    for field, value in investment_update.dict(exclude_unset=True).items():
-        setattr(db_investment, field, value)
+    for key, value in investment_data.model_dump(exclude_unset=True).items():
+        setattr(db_investment, key, value)
     
-    db_investment.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(db_investment)
     
-    metrics = calculate_metrics(db_investment)
-    return InvestmentResponse(
-        id=db_investment.id,
-        asset_type=db_investment.asset_type,
-        ticker=db_investment.ticker,
-        name=db_investment.name,
-        units=db_investment.units,
-        avg_buy_price=db_investment.avg_buy_price,
-        current_price=db_investment.current_price,
-        investment_thesis=db_investment.investment_thesis or "",
-        conviction_level=db_investment.conviction_level,
-        purchase_date=db_investment.purchase_date,
-        last_price_update=db_investment.last_price_update,
-        **metrics
-    )
+    usdinr_rate = await api_service.get_usdinr_rate()
+    metrics = await calculate_investment_metrics(db_investment, usdinr_rate)
+    inv_dict = db_investment.__dict__
+    inv_dict.update(metrics)
+    return InvestmentResponse.model_validate(inv_dict)
 
 @app.delete("/api/investments/{investment_id}")
-async def delete_investment(investment_id: int, db: Session = Depends(get_db)):
-    db_investment = db.query(Investment).filter(Investment.id == investment_id).first()
+def delete_investment(investment_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    db_investment = db.query(Investment).filter(Investment.id == investment_id, Investment.user_id == user.id).first()
     if not db_investment:
         raise HTTPException(status_code=404, detail="Investment not found")
-    
     db.delete(db_investment)
     db.commit()
-    return {"message": "Investment deleted successfully"}
+    return {"message": "Investment deleted"}
 
-@app.get("/api/portfolio/stats", response_model=PortfolioStats)
-async def get_portfolio_stats(db: Session = Depends(get_db)):
-    investments = db.query(Investment).all()
-    
-    total_invested = 0
-    current_value = 0
-    conviction_counts = {"High": 0, "Medium": 0, "Low": 0}
-    
-    for investment in investments:
-        total_invested += investment.units * investment.avg_buy_price
-        current_value += investment.units * investment.current_price
-        conviction_counts[investment.conviction_level] += 1
-    
-    total_unrealized_pnl = current_value - total_invested
-    net_return_percent = (total_unrealized_pnl / total_invested * 100) if total_invested > 0 else 0
-    
-    return PortfolioStats(
-        total_invested=total_invested,
-        current_value=current_value,
-        net_return_percent=net_return_percent,
-        total_unrealized_pnl=total_unrealized_pnl,
-        high_conviction_count=conviction_counts["High"],
-        medium_conviction_count=conviction_counts["Medium"],
-        low_conviction_count=conviction_counts["Low"],
-        total_holdings=len(investments)
-    )
+# --- PORTFOLIO STATS & REPORTS ---
+@app.get("/api/reports/allocation-analysis")
+async def get_allocation_analysis(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    investments = db.query(Investment).filter(Investment.user_id == user.id).all()
+    goals = db.query(AllocationGoal).filter(AllocationGoal.user_id == user.id).all()
+    usdinr_rate = await api_service.get_usdinr_rate()
 
-@app.post("/api/refresh-prices")
-async def refresh_prices(db: Session = Depends(get_db)):
-    """Manually refresh all investment prices"""
-    await update_all_prices()
-    return {"message": "Prices refreshed successfully"}
+    total_portfolio_value = 0
+    current_allocation = {}
 
+    for inv in investments:
+        metrics = await calculate_investment_metrics(inv, usdinr_rate)
+        value_inr = metrics['total_value_inr']
+        total_portfolio_value += value_inr
+        if inv.category:
+            if inv.category.name not in current_allocation:
+                current_allocation[inv.category.name] = 0
+            current_allocation[inv.category.name] += value_inr
+    
+    current_allocation_percent = {
+        cat: (val / total_portfolio_value * 100) if total_portfolio_value > 0 else 0
+        for cat, val in current_allocation.items()
+    }
+
+    ideal_allocation = {g.category.name: g.percentage for g in goals}
+
+    return {
+        "total_portfolio_value_inr": total_portfolio_value,
+        "current_allocation_by_value": current_allocation,
+        "current_allocation_by_percent": current_allocation_percent,
+        "ideal_allocation_by_percent": ideal_allocation
+    }
+
+
+# --- NEWS & UTILITIES ---
+@app.get("/api/news")
+async def get_portfolio_news(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    investments = db.query(Investment).filter(Investment.user_id == user.id, Investment.asset_type.not_in(['Crypto', 'Mutual Fund'])).all()
+    unique_tickers = list(set([inv.ticker for inv in investments]))
+    
+    all_news = []
+    for ticker in unique_tickers[:10]: # Limit to 10 to avoid rate limits
+        news_items = await api_service.get_news(ticker)
+        if news_items:
+            # Add ticker to each news item for frontend grouping
+            for item in news_items[:5]: # Max 5 news per ticker
+                item['ticker'] = ticker
+                all_news.append(item)
+    
+    return sorted(all_news, key=lambda x: x['datetime'], reverse=True)
+
+@app.post("/api/investments/bulk-upload")
+async def bulk_upload_investments(file: UploadFile = File(...), db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    try:
+        df = pd.read_excel(file.file)
+        required_columns = ['asset_type', 'ticker', 'name', 'units', 'currency', 'avg_buy_price_native', 'conviction_level', 'purchase_date']
+        if not all(col in df.columns for col in required_columns):
+            raise HTTPException(status_code=400, detail=f"Missing required columns in Excel file. Required: {required_columns}")
+
+        for _, row in df.iterrows():
+            inv_data = InvestmentCreate(
+                asset_type=row['asset_type'],
+                ticker=row['ticker'],
+                name=row['name'],
+                units=row['units'],
+                currency=row['currency'],
+                avg_buy_price_native=row['avg_buy_price_native'],
+                conviction_level=row['conviction_level'],
+                purchase_date=pd.to_datetime(row['purchase_date'])
+            )
+            # Create the investment record
+            await create_investment(inv_data, db, user)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to process file: {str(e)}")
+
+    return {"message": f"Successfully processed {len(df)} records from the uploaded file."}
+
+
+# --- MAIN EXECUTION ---
 if __name__ == "__main__":
     import uvicorn
+    # This part is for local development, Render uses the start command directly.
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    # Note: Render's start command should be: uvicorn backend.main:app --host 0.0.0.0 --port 8000
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
