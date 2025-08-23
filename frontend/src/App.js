@@ -1,6 +1,8 @@
+// frontend/src/App.js
 import React, { useState, useEffect } from 'react';
 import { Routes, Route, useNavigate } from 'react-router-dom';
 import { supabase } from './supabaseClient';
+import { ThemeProvider } from './contexts/ThemeContext';
 import Layout from './components/Layout';
 import PortfolioPage from './pages/PortfolioPage';
 import AllocationPage from './pages/AllocationPage';
@@ -8,7 +10,7 @@ import CategoriesPage from './pages/CategoriesPage';
 import NewsPage from './pages/NewsPage';
 import AuthPage from './pages/AuthPage';
 
-function App() {
+function AppContent() {
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
@@ -37,7 +39,10 @@ function App() {
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-900 flex items-center justify-center text-white">
-        Loading...
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-32 w-32 border-b-2 border-purple-500 mx-auto"></div>
+          <p className="mt-4 text-lg">Loading Portfolio Tracker...</p>
+        </div>
       </div>
     );
   }
@@ -57,6 +62,14 @@ function App() {
         </Route>
       )}
     </Routes>
+  );
+}
+
+function App() {
+  return (
+    <ThemeProvider>
+      <AppContent />
+    </ThemeProvider>
   );
 }
 
