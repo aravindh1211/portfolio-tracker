@@ -352,39 +352,155 @@ async def get_investments(db: Session = Depends(get_db), user: User = Depends(ge
 
 @app.post("/api/investments", response_model=InvestmentResponse)
 async def create_investment(investment: InvestmentCreate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    current_price = await api_service.get_price(investment.asset_type, investment.ticker)
-    db_investment = Investment(
-        **investment.dict(), 
-        user_id=user.id,
-        current_price_native=current_price
-    )
-    db.add(db_investment)
-    db.commit()
-    db.refresh(db_investment)
+    try:
+        # Validate the investment data
+        if investment.units <= 0:
+            raise HTTPException(status_code=400, detail="Units must be greater than 0")
+        if investment.avg_buy_price_native <= 0:
+            raise HTTPException(status_code=400, detail="Average buy price must be greater than 0")
+        
+        # Clean and validate ticker
+        clean_ticker = investment.ticker.upper().strip()
+        if not clean_ticker:
+            raise HTTPException(status_code=400, detail="Ticker symbol is required")
+        
+        # Clean name
+        clean_name = investment.name.strip()
+        if not clean_name:
+            raise HTTPException(status_code=400, detail="Investment name is required")
+        
+        print(f"Creating investment: {clean_name} ({clean_ticker}) for user {user.id}")
+        
+        # Get current price
+        current_price = await api_service.get_price(investment.asset_type, clean_ticker)
+        print(f"Got current price: {current_price}")
+        
+        # Create the database record
+        db_investment = Investment(
+            user_id=user.id,
+            asset_type=investment.asset_type,
+            ticker=clean_ticker,
+            name=clean_name,
+            units=investment.units,
+            currency=investment.currency,
+            avg_buy_price_native=investment.avg_buy_price_native,
+            current_price_native=current_price,
+            investment_thesis=investment.investment_thesis or "",
+            conviction_level=investment.conviction_level,
+            purchase_date=investment.purchase_date,
+            category_id=investment.category_id,
+            subcategory_id=investment.subcategory_id,
+            last_price_update=datetime.utcnow()
+        )
+        
+        db.add(db_investment)
+        db.commit()
+        db.refresh(db_investment)
+        
+        print(f"Investment created with ID: {db_investment.id}")
 
-    usdinr_rate = await api_service.get_usdinr_rate()
-    metrics = await calculate_investment_metrics(db_investment, usdinr_rate)
-    inv_dict = db_investment.__dict__
-    inv_dict.update(metrics)
-    return InvestmentResponse.model_validate(inv_dict)
+        # Calculate metrics for response
+        usdinr_rate = await api_service.get_usdinr_rate()
+        metrics = await calculate_investment_metrics(db_investment, usdinr_rate)
+        
+        # Prepare response data
+        response_data = {
+            'id': db_investment.id,
+            'asset_type': db_investment.asset_type,
+            'ticker': db_investment.ticker,
+            'name': db_investment.name,
+            'units': db_investment.units,
+            'currency': db_investment.currency,
+            'avg_buy_price_native': db_investment.avg_buy_price_native,
+            'current_price_native': db_investment.current_price_native,
+            'investment_thesis': db_investment.investment_thesis,
+            'conviction_level': db_investment.conviction_level,
+            'purchase_date': db_investment.purchase_date,
+            'last_price_update': db_investment.last_price_update,
+            'category_id': db_investment.category_id,
+            'subcategory_id': db_investment.subcategory_id,
+            'total_value_inr': metrics['total_value_inr'],
+            'unrealized_pnl_inr': metrics['unrealized_pnl_inr'],
+            'unrealized_pnl_percent': metrics['unrealized_pnl_percent']
+        }
+        
+        return InvestmentResponse(**response_data)
+        
+    except HTTPException as e:
+        db.rollback()
+        print(f"HTTP Exception in create_investment: {e.detail}")
+        raise e
+    except Exception as e:
+        db.rollback()
+        print(f"Unexpected error creating investment: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to create investment: {str(e)}")
 
 @app.put("/api/investments/{investment_id}", response_model=InvestmentResponse)
 async def update_investment(investment_id: int, investment_data: InvestmentUpdate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    db_investment = db.query(Investment).filter(Investment.id == investment_id, Investment.user_id == user.id).first()
-    if not db_investment:
-        raise HTTPException(status_code=404, detail="Investment not found")
-    
-    for key, value in investment_data.model_dump(exclude_unset=True).items():
-        setattr(db_investment, key, value)
-    
-    db.commit()
-    db.refresh(db_investment)
-    
-    usdinr_rate = await api_service.get_usdinr_rate()
-    metrics = await calculate_investment_metrics(db_investment, usdinr_rate)
-    inv_dict = db_investment.__dict__
-    inv_dict.update(metrics)
-    return InvestmentResponse.model_validate(inv_dict)
+    try:
+        # Find the investment
+        db_investment = db.query(Investment).filter(
+            Investment.id == investment_id, 
+            Investment.user_id == user.id
+        ).first()
+        
+        if not db_investment:
+            raise HTTPException(status_code=404, detail="Investment not found")
+        
+        print(f"Updating investment ID: {investment_id} for user: {user.id}")
+        
+        # Update only the fields that were provided
+        update_data = investment_data.model_dump(exclude_unset=True)
+        
+        for key, value in update_data.items():
+            if value is not None:  # Only update non-None values
+                setattr(db_investment, key, value)
+                print(f"Updated {key} to {value}")
+        
+        db.commit()
+        db.refresh(db_investment)
+        
+        print(f"Investment updated successfully")
+        
+        # Calculate metrics for response
+        usdinr_rate = await api_service.get_usdinr_rate()
+        metrics = await calculate_investment_metrics(db_investment, usdinr_rate)
+        
+        # Prepare response data
+        response_data = {
+            'id': db_investment.id,
+            'asset_type': db_investment.asset_type,
+            'ticker': db_investment.ticker,
+            'name': db_investment.name,
+            'units': db_investment.units,
+            'currency': db_investment.currency,
+            'avg_buy_price_native': db_investment.avg_buy_price_native,
+            'current_price_native': db_investment.current_price_native,
+            'investment_thesis': db_investment.investment_thesis,
+            'conviction_level': db_investment.conviction_level,
+            'purchase_date': db_investment.purchase_date,
+            'last_price_update': db_investment.last_price_update,
+            'category_id': db_investment.category_id,
+            'subcategory_id': db_investment.subcategory_id,
+            'total_value_inr': metrics['total_value_inr'],
+            'unrealized_pnl_inr': metrics['unrealized_pnl_inr'],
+            'unrealized_pnl_percent': metrics['unrealized_pnl_percent']
+        }
+        
+        return InvestmentResponse(**response_data)
+        
+    except HTTPException as e:
+        db.rollback()
+        print(f"HTTP Exception in update_investment: {e.detail}")
+        raise e
+    except Exception as e:
+        db.rollback()
+        print(f"Unexpected error updating investment: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to update investment: {str(e)}")
 
 @app.delete("/api/investments/{investment_id}")
 def delete_investment(investment_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
@@ -462,8 +578,12 @@ async def bulk_upload_investments(file: UploadFile = File(...), db: Session = De
 
     return {"message": f"Successfully processed {len(df)} records from the uploaded file."}
 
+# Create database tables
+Base.metadata.create_all(bind=engine)
+
 # --- MAIN EXECUTION ---
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
+
