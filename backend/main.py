@@ -15,6 +15,29 @@ from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, 
 from sqlalchemy.orm import sessionmaker, Session, declarative_base, relationship
 from supabase import create_client, Client
 
+# CORS origins configuration
+ALLOWED_ORIGINS = [
+    "http://localhost:3000",  # Local development
+]
+
+# Add production frontend URL if in production
+FRONTEND_URL = os.getenv("FRONTEND_URL")
+if FRONTEND_URL:
+    ALLOWED_ORIGINS.append(FRONTEND_URL)
+
+# In development, allow all origins
+if os.getenv("ENVIRONMENT") == "development":
+    ALLOWED_ORIGINS = ["*"]
+
+# Replace your existing CORS middleware with this:
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+)
+
 # --- CONFIGURATION & ENVIRONMENT VARIABLES ---
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./portfolio.db")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -586,4 +609,5 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
+
 
