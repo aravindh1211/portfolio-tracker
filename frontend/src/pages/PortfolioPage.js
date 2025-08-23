@@ -422,8 +422,8 @@ const PortfolioPage = () => {
                     <div className="text-xs text-purple-400">{inv.asset_type}</div>
                   </td>
                   <td className="p-4 text-right">{inv.units}</td>
-                  <td className="p-4 text-right">{inv.currency === 'USD' ? ' : '₹'}{inv.avg_buy_price_native.toFixed(2)}</td>
-                  <td className="p-4 text-right">{inv.currency === 'USD' ? ' : '₹'}{inv.current_price_native.toFixed(2)}</td>
+                  <td className="p-4 text-right">{inv.currency === 'USD' ? '$' : '₹'}{inv.avg_buy_price_native.toFixed(2)}</td>
+                  <td className="p-4 text-right">{inv.currency === 'USD' ? '$' : '₹'}{inv.current_price_native.toFixed(2)}</td>
                   <td className="p-4 text-right font-bold">₹{inv.total_value_inr.toFixed(2)}</td>
                   <td className={`p-4 text-right font-bold ${inv.unrealized_pnl_inr >= 0 ? 'text-green-400' : 'text-red-400'}`}>
                     ₹{inv.unrealized_pnl_inr.toFixed(2)}
