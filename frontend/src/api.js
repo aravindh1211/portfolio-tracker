@@ -22,8 +22,34 @@ const request = async (method, url, body = null) => {
   const response = await fetch(url, options);
 
   if (!response.ok) {
-    const errorData = await response.json();
-    throw new Error(errorData.detail || 'An API error occurred');
+    let errorMessage = 'An API error occurred';
+    
+    try {
+      const errorData = await response.json();
+      
+      // Handle different error response formats
+      if (errorData.detail) {
+        if (Array.isArray(errorData.detail)) {
+          // FastAPI validation errors come as an array
+          errorMessage = errorData.detail.map(err => 
+            `${err.loc ? err.loc.join('.') + ': ' : ''}${err.msg}`
+          ).join(', ');
+        } else if (typeof errorData.detail === 'string') {
+          errorMessage = errorData.detail;
+        } else {
+          errorMessage = JSON.stringify(errorData.detail);
+        }
+      } else if (errorData.message) {
+        errorMessage = errorData.message;
+      } else {
+        errorMessage = JSON.stringify(errorData);
+      }
+    } catch (parseError) {
+      // If we can't parse the response, use status text
+      errorMessage = `${response.status}: ${response.statusText}`;
+    }
+
+    throw new Error(errorMessage);
   }
 
   // Handle responses with no content
