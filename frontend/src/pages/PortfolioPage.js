@@ -69,47 +69,77 @@ const PortfolioPage = () => {
     setFormData(newFormData);
   };
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    setSubmitting(true);
-    
-    // Validate required fields
-    if (!formData.ticker || !formData.name || !formData.units || !formData.avg_buy_price_native) {
-      alert("Please fill in all required fields");
-      setSubmitting(false);
-      return;
-    }
+// Add this debug version of your handleSubmit function to PortfolioPage.js
+// Replace the existing handleSubmit function with this one:
 
-    const payload = {
-      asset_type: formData.asset_type,
-      ticker: formData.ticker.trim(),
-      name: formData.name.trim(),
-      units: parseFloat(formData.units),
-      currency: formData.currency,
-      avg_buy_price_native: parseFloat(formData.avg_buy_price_native),
-      conviction_level: formData.conviction_level,
-      purchase_date: formData.purchase_date,
-      investment_thesis: formData.investment_thesis || "",
-      category_id: formData.category_id ? parseInt(formData.category_id) : null,
-      subcategory_id: formData.subcategory_id ? parseInt(formData.subcategory_id) : null,
-    };
-    
-    try {
-      if (editingInv) {
-        await put(`${API_BASE}/api/investments/${editingInv.id}`, payload);
-      } else {
-        await post(`${API_BASE}/api/investments`, payload);
-      }
-      resetForm();
-      await fetchData(); // Wait for data to be fetched
-      alert(editingInv ? "Investment updated successfully!" : "Investment added successfully!");
-    } catch (error) {
-      console.error("Failed to save investment:", error);
-      alert("Failed to save investment. Please try again.");
-    } finally {
-      setSubmitting(false);
-    }
+const handleSubmit = async (e) => {
+  e.preventDefault();
+  setSubmitting(true);
+  
+  // Validate required fields
+  if (!formData.ticker || !formData.name || !formData.units || !formData.avg_buy_price_native) {
+    alert("Please fill in all required fields");
+    setSubmitting(false);
+    return;
+  }
+
+  // Validate numeric fields
+  if (isNaN(parseFloat(formData.units)) || parseFloat(formData.units) <= 0) {
+    alert("Units must be a valid positive number");
+    setSubmitting(false);
+    return;
+  }
+
+  if (isNaN(parseFloat(formData.avg_buy_price_native)) || parseFloat(formData.avg_buy_price_native) <= 0) {
+    alert("Average buy price must be a valid positive number");
+    setSubmitting(false);
+    return;
+  }
+
+  // Validate date
+  const purchaseDate = new Date(formData.purchase_date);
+  if (isNaN(purchaseDate.getTime())) {
+    alert("Please provide a valid purchase date");
+    setSubmitting(false);
+    return;
+  }
+
+  const payload = {
+    asset_type: formData.asset_type,
+    ticker: formData.ticker.trim().toUpperCase(),
+    name: formData.name.trim(),
+    units: parseFloat(formData.units),
+    currency: formData.currency,
+    avg_buy_price_native: parseFloat(formData.avg_buy_price_native),
+    conviction_level: formData.conviction_level,
+    purchase_date: formData.purchase_date + "T00:00:00", // Ensure proper ISO format
+    investment_thesis: formData.investment_thesis || "",
+    category_id: formData.category_id ? parseInt(formData.category_id) : null,
+    subcategory_id: formData.subcategory_id ? parseInt(formData.subcategory_id) : null,
   };
+  
+  // Debug logging
+  console.log("Submitting payload:", JSON.stringify(payload, null, 2));
+  
+  try {
+    if (editingInv) {
+      await put(`${API_BASE}/api/investments/${editingInv.id}`, payload);
+    } else {
+      await post(`${API_BASE}/api/investments`, payload);
+    }
+    resetForm();
+    await fetchData(); // Wait for data to be fetched
+    alert(editingInv ? "Investment updated successfully!" : "Investment added successfully!");
+  } catch (error) {
+    console.error("Failed to save investment:", error);
+    console.error("Error details:", error.message);
+    
+    // Show the actual error message to the user
+    alert(`Failed to save investment: ${error.message}`);
+  } finally {
+    setSubmitting(false);
+  }
+};
 
   const handleEdit = (inv) => {
     setEditingInv(inv);
@@ -473,3 +503,4 @@ const PortfolioPage = () => {
 };
 
 export default PortfolioPage;
+
