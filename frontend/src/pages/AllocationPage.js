@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { get, post } from '../api';
 import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer } from 'recharts';
-import { Download } from 'lucide-react';
+import { Download, Tag } from 'lucide-react';
 import { exportAllocationToCSV } from '../utils/exportUtils';
 
 // ❗ ACTION REQUIRED: Replace this URL with your actual backend URL from Render.
@@ -302,3 +302,4 @@ const AllocationPage = () => {
 };
 
 export default AllocationPage;
+
