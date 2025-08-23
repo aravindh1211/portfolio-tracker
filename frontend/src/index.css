@@ -1,3 +1,4 @@
+/* frontend/src/index.css */
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -9,16 +10,16 @@ body {
     sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  background-color: #111827;
-  color: #ffffff;
-  transition: background-color 0.2s ease, color 0.2s ease;
+  transition: background-color 0.3s ease, color 0.3s ease;
 }
 
+/* Dark mode styles */
 .dark body {
   background-color: #111827;
   color: #ffffff;
 }
 
+/* Light mode styles */
 body:not(.dark) {
   background-color: #f9fafb;
   color: #111827;
@@ -29,29 +30,51 @@ code {
     monospace;
 }
 
-::-webkit-scrollbar {
+/* Custom scrollbar for dark mode */
+.dark ::-webkit-scrollbar {
   width: 8px;
 }
 
-::-webkit-scrollbar-track {
+.dark ::-webkit-scrollbar-track {
   background: #374151;
 }
 
-::-webkit-scrollbar-thumb {
+.dark ::-webkit-scrollbar-thumb {
   background: #6b7280;
   border-radius: 4px;
 }
 
-::-webkit-scrollbar-thumb:hover {
+.dark ::-webkit-scrollbar-thumb:hover {
   background: #9ca3af;
 }
 
-* {
-  transition: all 0.2s ease-in-out;
+/* Light mode scrollbar */
+:not(.dark) ::-webkit-scrollbar {
+  width: 8px;
 }
 
+:not(.dark) ::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+
+:not(.dark) ::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+
+:not(.dark) ::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* Smooth transitions for all elements */
+* {
+  transition: background-color 0.2s ease-in-out, color 0.2s ease-in-out, border-color 0.2s ease-in-out;
+}
+
+/* Details/Summary styling */
 details > summary {
   list-style: none;
+  cursor: pointer;
 }
 
 details > summary::-webkit-details-marker {
@@ -67,4 +90,35 @@ details > summary::before {
 
 details[open] > summary::before {
   transform: rotate(90deg);
+}
+
+/* Custom classes for theme-aware components */
+@layer components {
+  .theme-card {
+    @apply dark:bg-gray-800 dark:border-gray-700 bg-white border-gray-200 border rounded-lg;
+  }
+  
+  .theme-input {
+    @apply dark:bg-gray-700 dark:border-gray-600 dark:text-white bg-white border-gray-300 text-gray-900 rounded-md focus:ring-2 focus:ring-purple-500 focus:border-transparent;
+  }
+  
+  .theme-button {
+    @apply bg-purple-600 hover:bg-purple-700 text-white font-medium py-2 px-4 rounded-lg transition-colors duration-200;
+  }
+  
+  .theme-button-secondary {
+    @apply dark:bg-gray-600 dark:hover:bg-gray-500 dark:text-white bg-gray-200 hover:bg-gray-300 text-gray-900 font-medium py-2 px-4 rounded-lg transition-colors duration-200;
+  }
+  
+  .theme-text-primary {
+    @apply dark:text-white text-gray-900;
+  }
+  
+  .theme-text-secondary {
+    @apply dark:text-gray-300 text-gray-600;
+  }
+  
+  .theme-text-muted {
+    @apply dark:text-gray-400 text-gray-500;
+  }
 }
