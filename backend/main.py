@@ -653,26 +653,32 @@ async def health_check():
     """Health check endpoint for cloud deployment"""
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
 
+# Replace the get_investments endpoint in your main.py with this:
+
 @app.get("/api/investments", response_model=List[InvestmentResponse])
 async def get_investments(db: Session = Depends(get_db)):
+    """Get all investments with currency-aware calculations"""
     investments = db.query(Investment).all()
     result = []
     
     for investment in investments:
+        # Use the updated calculate_metrics function
         metrics = calculate_metrics(investment)
+        
         result.append(InvestmentResponse(
             id=investment.id,
             asset_type=investment.asset_type,
             ticker=investment.ticker,
             name=investment.name,
             units=investment.units,
-            avg_buy_price=investment.avg_buy_price,
-            current_price=investment.current_price,
+            avg_buy_price=investment.avg_buy_price,  # In native currency
+            current_price=investment.current_price,  # In native currency
+            currency=getattr(investment, 'currency', 'INR'),  # Handle missing currency field
             investment_thesis=investment.investment_thesis or "",
             conviction_level=investment.conviction_level,
             purchase_date=investment.purchase_date,
             last_price_update=investment.last_price_update,
-            **metrics
+            **metrics  # This includes total_value_inr, unrealized_pnl_inr, etc.
         ))
     
     return result
@@ -743,6 +749,8 @@ async def create_investment(investment: InvestmentCreate, db: Session = Depends(
         print(f"Error creating investment: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to create investment: {str(e)}")
 
+# Replace the update_investment endpoint in your main.py with this:
+
 @app.put("/api/investments/{investment_id}", response_model=InvestmentResponse)
 async def update_investment(
     investment_id: int, 
@@ -761,7 +769,9 @@ async def update_investment(
     db.commit()
     db.refresh(db_investment)
     
+    # Use updated metrics calculation
     metrics = calculate_metrics(db_investment)
+    
     return InvestmentResponse(
         id=db_investment.id,
         asset_type=db_investment.asset_type,
@@ -770,6 +780,7 @@ async def update_investment(
         units=db_investment.units,
         avg_buy_price=db_investment.avg_buy_price,
         current_price=db_investment.current_price,
+        currency=getattr(db_investment, 'currency', 'INR'),
         investment_thesis=db_investment.investment_thesis or "",
         conviction_level=db_investment.conviction_level,
         purchase_date=db_investment.purchase_date,
@@ -787,29 +798,45 @@ async def delete_investment(investment_id: int, db: Session = Depends(get_db)):
     db.commit()
     return {"message": "Investment deleted successfully"}
 
+# Replace the get_portfolio_stats endpoint in your main.py with this:
+
 @app.get("/api/portfolio/stats", response_model=PortfolioStats)
 async def get_portfolio_stats(db: Session = Depends(get_db)):
+    """Get portfolio statistics with currency conversion support"""
     investments = db.query(Investment).all()
     
-    total_invested = 0
-    current_value = 0
+    total_invested_inr = 0
+    current_value_inr = 0
     conviction_counts = {"High": 0, "Medium": 0, "Low": 0}
     
+    # Get current USD/INR rate for conversions
+    usd_to_inr_rate = CurrencyConverter.get_usd_to_inr_rate()
+    
     for investment in investments:
-        total_invested += investment.units * investment.avg_buy_price
-        current_value += investment.units * investment.current_price
+        # Calculate invested amount in INR
+        invested_native = investment.units * investment.avg_buy_price
+        invested_inr = CurrencyConverter.convert_to_inr(invested_native, investment.currency)
+        total_invested_inr += invested_inr
+        
+        # Calculate current value in INR  
+        current_native = investment.units * investment.current_price
+        current_inr = CurrencyConverter.convert_to_inr(current_native, investment.currency)
+        current_value_inr += current_inr
+        
+        # Count conviction levels
         conviction_counts[investment.conviction_level] += 1
     
-    total_unrealized_pnl = current_value - total_invested
-    net_return_percent = (total_unrealized_pnl / total_invested * 100) if total_invested > 0 else 0
+    # Calculate returns
+    total_unrealized_pnl_inr = current_value_inr - total_invested_inr
+    net_return_percent = (total_unrealized_pnl_inr / total_invested_inr * 100) if total_invested_inr > 0 else 0
     
     return PortfolioStats(
-        total_invested=total_invested,
-        current_value=current_value,
+        total_invested=total_invested_inr,  # Now in INR
+        current_value=current_value_inr,   # Now in INR  
         net_return_percent=net_return_percent,
-        total_unrealized_pnl=total_unrealized_pnl,
+        total_unrealized_pnl=total_unrealized_pnl_inr,  # Now in INR
         high_conviction_count=conviction_counts["High"],
-        medium_conviction_count=conviction_counts["Medium"],
+        medium_conviction_count=conviction_counts["Medium"], 
         low_conviction_count=conviction_counts["Low"],
         total_holdings=len(investments)
     )
@@ -850,6 +877,7 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"Starting server on port {port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
+
 
 
 
