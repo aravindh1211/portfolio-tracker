@@ -15,8 +15,6 @@ from contextlib import asynccontextmanager
 # Environment variables for database
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./portfolio.db")
 
-# For Supabase/PostgreSQL, keep the URL as is
-# For local development, use SQLite as fallback
 if "postgresql://" not in DATABASE_URL and "sqlite://" not in DATABASE_URL:
     DATABASE_URL = "sqlite:///./portfolio.db"
 
@@ -28,7 +26,6 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 # Database Models
-# Updated Database Models (Replace in your main.py)
 class Investment(Base):
     __tablename__ = "investments"
     
@@ -37,9 +34,9 @@ class Investment(Base):
     ticker = Column(String, nullable=False, index=True)
     name = Column(String, nullable=False)
     units = Column(Float, nullable=False)
-    avg_buy_price = Column(Float, nullable=False)  # In original currency (USD for US stocks)
-    current_price = Column(Float, default=0.0)  # In original currency
-    currency = Column(String, default="INR")  # New field: USD, INR
+    avg_buy_price = Column(Float, nullable=False)  # USD for US stocks, INR for crypto/Indian stocks
+    current_price = Column(Float, default=0.0)  # Native currency (USD for US stocks, will be converted for crypto)
+    currency = Column(String, default="INR")  # Buy price currency
     investment_thesis = Column(Text)
     conviction_level = Column(String, nullable=False)  # High, Medium, Low
     purchase_date = Column(DateTime, nullable=False)
@@ -47,7 +44,7 @@ class Investment(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-# Currency Conversion Service (Add this to your main.py)
+# Currency Conversion Service
 class CurrencyConverter:
     _usd_to_inr_rate = 83.0  # Fallback rate
     _last_updated = None
@@ -56,11 +53,9 @@ class CurrencyConverter:
     def get_usd_to_inr_rate(cls) -> float:
         """Get live USD to INR conversion rate with caching"""
         try:
-            # Update rate only if it's older than 1 hour
             now = datetime.utcnow()
             if cls._last_updated is None or (now - cls._last_updated).total_seconds() > 3600:
                 
-                # Try multiple sources for USD/INR rate
                 sources = [
                     cls._get_rate_from_yahoo,
                     cls._get_rate_from_exchange_api,
@@ -133,7 +128,6 @@ class CurrencyConverter:
     def _get_rate_from_fixer() -> Optional[float]:
         """Get USD/INR rate from Fixer.io (free tier available)"""
         try:
-            # You can get a free API key from fixer.io
             api_key = os.getenv('FIXER_API_KEY', '')
             if not api_key:
                 return None
@@ -164,17 +158,16 @@ class CurrencyConverter:
             rate = cls.get_usd_to_inr_rate()
             return amount * rate
         else:
-            # Add more currencies as needed
             return amount
-            
-# Updated Pydantic Models (Replace in your main.py)
+
+# Updated Pydantic Models
 class InvestmentCreate(BaseModel):
     asset_type: str
     ticker: str
     name: str
     units: float
-    avg_buy_price: float
-    currency: str = "INR"  # New field
+    avg_buy_price: float  # USD for US stocks, INR for crypto/Indian stocks
+    currency: str = "INR"  # Currency of the buy price you're inputting
     investment_thesis: Optional[str] = ""
     conviction_level: str
     purchase_date: datetime
@@ -182,7 +175,7 @@ class InvestmentCreate(BaseModel):
 class InvestmentUpdate(BaseModel):
     units: Optional[float] = None
     avg_buy_price: Optional[float] = None
-    currency: Optional[str] = None  # New field
+    currency: Optional[str] = None
     investment_thesis: Optional[str] = None
     conviction_level: Optional[str] = None
 
@@ -192,9 +185,10 @@ class InvestmentResponse(BaseModel):
     ticker: str
     name: str
     units: float
-    avg_buy_price: float  # Original currency
-    current_price: float  # Original currency
-    currency: str  # New field
+    avg_buy_price: float  # As stored (USD for US stocks, INR for crypto)
+    current_price: float  # Native price before conversion
+    current_price_inr: float  # Current price converted to INR for crypto
+    currency: str  # Currency of avg_buy_price
     investment_thesis: str
     conviction_level: str
     purchase_date: datetime
@@ -203,7 +197,10 @@ class InvestmentResponse(BaseModel):
     total_invested_inr: float  # Always in INR
     unrealized_pnl_inr: float  # Always in INR
     unrealized_pnl_percent: float
-    usd_to_inr_rate: Optional[float] = None  # Current conversion rate
+    usd_to_inr_rate: Optional[float] = None
+    # Formatted display strings
+    buy_price_formatted: str  # e.g., "$191.48" or "₹67000"
+    current_price_formatted: str  # e.g., "$340.01" or "₹95000"
 
     class Config:
         from_attributes = True
@@ -219,7 +216,6 @@ class PortfolioStats(BaseModel):
     total_holdings: int
 
 # Enhanced Price fetching service
-# Enhanced Price fetching service with multiple sources
 class PriceFetcher:
     def __init__(self):
         self.headers = {
@@ -230,11 +226,8 @@ class PriceFetcher:
             'Connection': 'keep-alive'
         }
         
-        # Get Alpha Vantage API key from environment variable
-        self.alpha_vantage_key = os.getenv('ALPHA_VANTAGE_API_KEY', 'demo')
-        
     def get_price_yahoo_simple(self, ticker: str) -> Optional[float]:
-        """Yahoo Finance - Simple endpoint (least likely to be rate limited)"""
+        """Yahoo Finance - Simple endpoint"""
         try:
             url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1m&range=1d"
             response = requests.get(url, headers=self.headers, timeout=8)
@@ -250,7 +243,6 @@ class PriceFetcher:
                     if current_price:
                         return float(current_price)
                         
-                    # Fallback to last close price
                     quotes = result.get('indicators', {}).get('quote', [{}])
                     if quotes and quotes[0].get('close'):
                         closes = [c for c in quotes[0]['close'] if c is not None]
@@ -262,75 +254,9 @@ class PriceFetcher:
             
         return None
     
-    def get_price_yahoo_search(self, ticker: str) -> Optional[float]:
-        """Yahoo Finance - Search endpoint"""
-        try:
-            url = f"https://query1.finance.yahoo.com/v1/finance/search?q={ticker}"
-            response = requests.get(url, headers=self.headers, timeout=8)
-            
-            if response.status_code == 200:
-                data = response.json()
-                quotes = data.get('quotes', [])
-                
-                for quote in quotes:
-                    if quote.get('symbol') == ticker:
-                        price = quote.get('regularMarketPrice')
-                        if price and price > 0:
-                            return float(price)
-                            
-        except Exception as e:
-            print(f"Yahoo Search failed for {ticker}: {e}")
-            
-        return None
-    
-    def get_price_yfinance_fallback(self, ticker: str) -> Optional[float]:
-        """yfinance as fallback (your original method)"""
-        try:
-            import yfinance as yf
-            stock = yf.Ticker(ticker)
-            hist = stock.history(period="1d")
-            if not hist.empty:
-                return float(hist['Close'].iloc[-1])
-            
-            # Fallback: try current data
-            info = stock.info
-            if 'currentPrice' in info:
-                return float(info['currentPrice'])
-            elif 'regularMarketPrice' in info:
-                return float(info['regularMarketPrice'])
-                
-        except Exception as e:
-            print(f"yfinance fallback failed for {ticker}: {e}")
-            
-        return None
-    
-    def get_price_alpha_vantage(self, ticker: str) -> Optional[float]:
-        """Alpha Vantage API"""
-        try:
-            if self.alpha_vantage_key == 'demo':
-                print(f"Skipping Alpha Vantage for {ticker} - no API key")
-                return None
-                
-            url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={ticker}&apikey={self.alpha_vantage_key}"
-            response = requests.get(url, timeout=8)
-            
-            if response.status_code == 200:
-                data = response.json()
-                quote = data.get('Global Quote', {})
-                price = quote.get('05. price')
-                
-                if price:
-                    return float(price)
-                    
-        except Exception as e:
-            print(f"Alpha Vantage failed for {ticker}: {e}")
-            
-        return None
-    
     def get_crypto_price_coingecko(self, ticker: str) -> Optional[float]:
-        """CoinGecko for cryptocurrency prices"""
+        """CoinGecko for cryptocurrency prices (returns USD)"""
         try:
-            # Convert ticker to CoinGecko ID
             crypto_mapping = {
                 'BTC-USD': 'bitcoin',
                 'ETH-USD': 'ethereum',
@@ -378,9 +304,6 @@ class PriceFetcher:
         # For stocks, try multiple sources
         sources = [
             ("Yahoo Simple", self.get_price_yahoo_simple),
-            ("Yahoo Search", self.get_price_yahoo_search),
-            ("yfinance Fallback", self.get_price_yfinance_fallback),
-            ("Alpha Vantage", self.get_price_alpha_vantage),
         ]
         
         for source_name, source_func in sources:
@@ -395,112 +318,19 @@ class PriceFetcher:
             except Exception as e:
                 print(f"❌ {source_name} error: {e}")
             
-            # Very short delay between sources
             import time
             time.sleep(0.1)
         
         print(f"❌ All sources failed for {ticker}")
         return 0.0
 
-    # Updated static methods to use the new multi-source fetcher
-    @staticmethod
-    async def get_stock_price(ticker: str) -> float:
-        """Fetch stock price using multi-source fetcher"""
-        fetcher = PriceFetcher()
-        price = fetcher.get_price_with_fallbacks(ticker, "Stock")
-        return price if price is not None else 0.0
-
-    @staticmethod
-    async def get_crypto_price(ticker: str) -> float:
-        """Fetch crypto price using CoinGecko and fallbacks"""
-        fetcher = PriceFetcher()
-        price = fetcher.get_price_with_fallbacks(ticker, "Crypto")
-        return price if price is not None else 0.0
-
-    @staticmethod
-    async def get_mutual_fund_price(ticker: str) -> float:
-        """Fetch mutual fund price using multi-source fetcher"""
-        fetcher = PriceFetcher()
-        price = fetcher.get_price_with_fallbacks(ticker, "Stock")
-        return price if price is not None else 0.0
-
-    @staticmethod
-    async def get_price(asset_type: str, ticker: str) -> float:
-        """Universal price fetcher with multiple fallbacks"""
-        fetcher = PriceFetcher()
-        
-        if asset_type.lower() == "crypto":
-            return fetcher.get_price_with_fallbacks(ticker, "Crypto") or 0.0
-        elif asset_type.lower() in ["stock", "mutual fund"]:
-            return fetcher.get_price_with_fallbacks(ticker, "Stock") or 0.0
-        
-        return 0.0
-
-    @staticmethod
-    async def get_crypto_price(ticker: str) -> float:
-        """Fetch crypto price using CoinGecko free API"""
-        try:
-            # Convert ticker format (BTC-USD -> bitcoin)
-            crypto_map = {
-                'BTC-USD': 'bitcoin',
-                'ETH-USD': 'ethereum',
-                'ADA-USD': 'cardano',
-                'DOT-USD': 'polkadot',
-                'MATIC-USD': 'matic-network',
-                'SOL-USD': 'solana',
-                'AVAX-USD': 'avalanche-2',
-                'LINK-USD': 'chainlink',
-                'UNI-USD': 'uniswap',
-                'ATOM-USD': 'cosmos',
-                'XRP-USD': 'ripple',
-                'LTC-USD': 'litecoin',
-                'BCH-USD': 'bitcoin-cash',
-                'DOGE-USD': 'dogecoin'
-            }
-            
-            crypto_id = crypto_map.get(ticker.upper(), ticker.lower().replace('-usd', ''))
-            
-            url = f"https://api.coingecko.com/api/v3/simple/price?ids={crypto_id}&vs_currencies=usd"
-            response = requests.get(url, timeout=10)
-            
-            if response.status_code == 200:
-                data = response.json()
-                if crypto_id in data:
-                    return float(data[crypto_id]['usd'])
-            
-            # Fallback: try yfinance for crypto
-            return await PriceFetcher.get_stock_price(ticker)
-        except Exception as e:
-            print(f"Error fetching crypto price for {ticker}: {e}")
-            return 0.0
-
-    @staticmethod
-    async def get_mutual_fund_price(ticker: str) -> float:
-        """Fetch mutual fund price using yfinance"""
-        return await PriceFetcher.get_stock_price(ticker)
-
-    @staticmethod
-    async def get_price(asset_type: str, ticker: str) -> float:
-        """Universal price fetcher with multiple fallbacks"""
-        if asset_type.lower() == "crypto":
-            return await PriceFetcher.get_crypto_price(ticker)
-        elif asset_type.lower() in ["stock", "mutual fund"]:
-            return await PriceFetcher.get_stock_price(ticker)
-        return 0.0
-
     @staticmethod
     async def get_price_in_native_currency(asset_type: str, ticker: str) -> tuple[float, str]:
-        """
-        Get price in native currency and return (price, currency)
-        
-        Returns:
-            tuple: (price, currency) e.g., (150.25, "USD") or (3500.0, "INR")
-        """
+        """Get price in native currency and return (price, currency)"""
         fetcher = PriceFetcher()
         
-        # Determine native currency based on ticker and asset type
         if asset_type.lower() == "crypto":
-            # Crypto prices are typically in USD
+            # Crypto prices are fetched in USD from APIs
             price = fetcher.get_price_with_fallbacks(ticker, "Crypto") or 0.0
             return (price, "USD")
             
@@ -518,28 +348,21 @@ class PriceFetcher:
             # Default to INR for mutual funds and others
             price = fetcher.get_price_with_fallbacks(ticker, "Stock") or 0.0
             return (price, "INR")
-    
-    @staticmethod
-    async def get_price(asset_type: str, ticker: str) -> float:
-        """Universal price fetcher - returns price in native currency"""
-        price, currency = await PriceFetcher.get_price_in_native_currency(asset_type, ticker)
-        return price
 
-# Updated background task for price updates (Replace in your main.py)
+# Updated background task for price updates
 async def update_all_prices():
-    """Background task to update all investment prices with currency support"""
+    """Background task to update all investment prices"""
     db = SessionLocal()
     try:
         investments = db.query(Investment).all()
         print(f"Updating prices for {len(investments)} investments...")
         
         for investment in investments:
-            # Only update if price is older than 15 minutes
             time_since_update = (datetime.utcnow() - investment.last_price_update).total_seconds()
             if time_since_update > 900:  # 15 minutes
-                print(f"Updating price for {investment.ticker} ({investment.currency})")
+                print(f"Updating price for {investment.ticker}")
                 
-                # Get price in native currency
+                # Get price in native currency (USD for crypto/US stocks, INR for Indian)
                 new_price, price_currency = await PriceFetcher.get_price_in_native_currency(
                     investment.asset_type, 
                     investment.ticker
@@ -548,11 +371,6 @@ async def update_all_prices():
                 if new_price > 0:
                     investment.current_price = new_price
                     investment.last_price_update = datetime.utcnow()
-                    
-                    # Update currency if it was unknown
-                    if not investment.currency:
-                        investment.currency = price_currency
-                    
                     print(f"Updated {investment.ticker}: {new_price} {price_currency}")
                 else:
                     print(f"Could not fetch price for {investment.ticker}")
@@ -564,46 +382,40 @@ async def update_all_prices():
         db.rollback()
     finally:
         db.close()
-        
+
 # Lifespan management
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
     print("🚀 Portfolio Tracker API starting up...")
     
-    # Create background task for price updates
     async def price_update_loop():
         while True:
             await update_all_prices()
-            await asyncio.sleep(900)  # Wait 15 minutes
+            await asyncio.sleep(900)
     
-    # Start background task
     task = asyncio.create_task(price_update_loop())
     
     yield
     
-    # Shutdown
     task.cancel()
     print("🛑 Portfolio Tracker API shutting down...")
 
 # FastAPI app
 app = FastAPI(
     title="Personal Investment Portfolio Tracker",
-    description="Track your investments across Indian Stocks, US Stocks, Cryptocurrencies, and Mutual Funds",
-    version="2.0.0",
+    description="Track your investments with proper currency handling",
+    version="2.1.0",
     lifespan=lifespan
 )
 
-# CORS middleware - Allow all origins for cloud deployment
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Dependency to get database session
 def get_db():
     db = SessionLocal()
     try:
@@ -611,31 +423,78 @@ def get_db():
     finally:
         db.close()
 
-# Updated helper function to calculate investment metrics (Replace in your main.py)
+# UPDATED helper function with correct currency logic
 def calculate_metrics(investment: Investment) -> dict:
-    """Calculate investment metrics with proper currency conversion"""
+    """Calculate investment metrics with corrected currency handling"""
     
-    # Get current USD/INR rate
     usd_to_inr_rate = CurrencyConverter.get_usd_to_inr_rate()
     
-    # Calculate values in native currency
-    total_value_native = investment.units * investment.current_price
-    total_invested_native = investment.units * investment.avg_buy_price
+    # Ensure valid numeric values
+    units = float(investment.units) if investment.units else 0.0
+    current_price = float(investment.current_price) if investment.current_price else 0.0
+    avg_buy_price = float(investment.avg_buy_price) if investment.avg_buy_price else 0.0
+    currency = getattr(investment, 'currency', 'INR') or 'INR'
     
-    # Convert to INR for display
-    total_value_inr = CurrencyConverter.convert_to_inr(total_value_native, investment.currency)
-    total_invested_inr = CurrencyConverter.convert_to_inr(total_invested_native, investment.currency)
+    # Determine asset type behavior
+    if investment.asset_type.lower() == "crypto":
+        # CRYPTO: Buy price in INR, Current price fetched in USD → convert to INR
+        current_price_inr = current_price * usd_to_inr_rate  # Convert USD to INR
+        buy_price_inr = avg_buy_price  # Already in INR
+        
+        # Format for display
+        buy_price_formatted = f"₹{avg_buy_price:,.2f}"
+        current_price_formatted = f"₹{current_price_inr:,.2f}"
+        
+    elif investment.ticker.endswith('.NS') or investment.ticker.endswith('.BO'):
+        # INDIAN STOCKS: Everything in INR
+        current_price_inr = current_price  # Already in INR
+        buy_price_inr = avg_buy_price  # Already in INR
+        
+        buy_price_formatted = f"₹{avg_buy_price:,.2f}"
+        current_price_formatted = f"₹{current_price:,.2f}"
+        
+    else:
+        # US STOCKS: Buy price in USD, Current price in USD, but totals in INR
+        current_price_inr = current_price  # Keep USD for display
+        buy_price_inr = avg_buy_price  # Keep USD for calculations
+        
+        buy_price_formatted = f"${avg_buy_price:,.2f}"
+        current_price_formatted = f"${current_price:,.2f}"
+    
+    # Calculate totals in INR
+    if investment.asset_type.lower() == "crypto":
+        # For crypto: buy price is INR, current price converted to INR
+        total_invested_inr = units * buy_price_inr  # INR
+        total_value_inr = units * current_price_inr  # INR
+    elif investment.ticker.endswith('.NS') or investment.ticker.endswith('.BO'):
+        # For Indian stocks: everything in INR
+        total_invested_inr = units * buy_price_inr  # INR
+        total_value_inr = units * current_price_inr  # INR
+    else:
+        # For US stocks: convert both to INR
+        total_invested_inr = units * buy_price_inr * usd_to_inr_rate  # USD → INR
+        total_value_inr = units * current_price_inr * usd_to_inr_rate  # USD → INR
     
     # Calculate P&L in INR
     unrealized_pnl_inr = total_value_inr - total_invested_inr
     unrealized_pnl_percent = (unrealized_pnl_inr / total_invested_inr * 100) if total_invested_inr > 0 else 0
+    
+    # NaN protection
+    total_value_inr = total_value_inr if not (total_value_inr != total_value_inr) else 0.0
+    total_invested_inr = total_invested_inr if not (total_invested_inr != total_invested_inr) else 0.0
+    unrealized_pnl_inr = unrealized_pnl_inr if not (unrealized_pnl_inr != unrealized_pnl_inr) else 0.0
+    unrealized_pnl_percent = unrealized_pnl_percent if not (unrealized_pnl_percent != unrealized_pnl_percent) else 0.0
+    current_price_inr = current_price_inr if not (current_price_inr != current_price_inr) else 0.0
     
     return {
         "total_value_inr": total_value_inr,
         "total_invested_inr": total_invested_inr,
         "unrealized_pnl_inr": unrealized_pnl_inr,
         "unrealized_pnl_percent": unrealized_pnl_percent,
-        "usd_to_inr_rate": usd_to_inr_rate if investment.currency == "USD" else None
+        "current_price_inr": current_price_inr,  # For crypto display
+        "usd_to_inr_rate": usd_to_inr_rate,
+        "buy_price_formatted": buy_price_formatted,
+        "current_price_formatted": current_price_formatted
     }
 
 # API Routes
@@ -643,26 +502,23 @@ def calculate_metrics(investment: Investment) -> dict:
 async def root():
     return {
         "message": "Personal Investment Portfolio Tracker API", 
-        "version": "2.0.0", 
+        "version": "2.1.0", 
         "status": "running",
-        "features": ["Real-time price updates", "Multi-asset support", "Dark/Light mode"]
+        "currency_logic": "US stocks: USD prices, INR totals | Crypto: INR buy price, INR display | Indian: All INR"
     }
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint for cloud deployment"""
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
 
-# Replace the get_investments endpoint in your main.py with this:
-
+# UPDATED get_investments endpoint
 @app.get("/api/investments", response_model=List[InvestmentResponse])
 async def get_investments(db: Session = Depends(get_db)):
-    """Get all investments with currency-aware calculations"""
+    """Get all investments with corrected currency handling"""
     investments = db.query(Investment).all()
     result = []
     
     for investment in investments:
-        # Use the updated calculate_metrics function
         metrics = calculate_metrics(investment)
         
         result.append(InvestmentResponse(
@@ -671,35 +527,34 @@ async def get_investments(db: Session = Depends(get_db)):
             ticker=investment.ticker,
             name=investment.name,
             units=investment.units,
-            avg_buy_price=investment.avg_buy_price,  # In native currency
-            current_price=investment.current_price,  # In native currency
-            currency=getattr(investment, 'currency', 'INR'),  # Handle missing currency field
+            avg_buy_price=investment.avg_buy_price,
+            current_price=investment.current_price,
+            current_price_inr=metrics["current_price_inr"],  # For crypto
+            currency=getattr(investment, 'currency', 'INR'),
             investment_thesis=investment.investment_thesis or "",
             conviction_level=investment.conviction_level,
             purchase_date=investment.purchase_date,
             last_price_update=investment.last_price_update,
-            **metrics  # This includes total_value_inr, unrealized_pnl_inr, etc.
+            **{k: v for k, v in metrics.items() if k != "current_price_inr"}
         ))
     
     return result
 
-# Updated create investment endpoint (Replace in your main.py)
+# UPDATED create investment endpoint
 @app.post("/api/investments", response_model=InvestmentResponse)
 async def create_investment(investment: InvestmentCreate, db: Session = Depends(get_db)):
     try:
         print(f"Creating investment: {investment.ticker}")
         
-        # Determine currency automatically if not provided
-        currency = investment.currency
-        if not currency or currency == "INR":
-            if investment.ticker.endswith('.NS') or investment.ticker.endswith('.BO'):
-                currency = "INR"
-            elif investment.asset_type.lower() == "crypto":
-                currency = "USD"  # Crypto buy prices typically in USD
-            elif investment.asset_type.lower() == "stock":
-                currency = "USD"  # Assume US stocks if no .NS/.BO suffix
-            else:
-                currency = "INR"  # Default
+        # Determine currency logic
+        if investment.ticker.endswith('.NS') or investment.ticker.endswith('.BO'):
+            currency = "INR"  # Indian stocks
+        elif investment.asset_type.lower() == "crypto":
+            currency = "INR"  # You input crypto buy prices in INR
+        elif investment.asset_type.lower() == "stock":
+            currency = "USD"  # US stocks buy price in USD
+        else:
+            currency = investment.currency or "INR"
         
         # Fetch current price in native currency
         current_price, price_currency = await PriceFetcher.get_price_in_native_currency(
@@ -712,10 +567,10 @@ async def create_investment(investment: InvestmentCreate, db: Session = Depends(
             asset_type=investment.asset_type,
             ticker=investment.ticker,
             name=investment.name,
-            units=investment.units,
-            avg_buy_price=investment.avg_buy_price,
-            currency=currency,
-            current_price=current_price,
+            units=float(investment.units),
+            avg_buy_price=float(investment.avg_buy_price),  # As you input it
+            currency=currency,  # Currency of your buy price input
+            current_price=float(current_price) if current_price else 0.0,
             investment_thesis=investment.investment_thesis,
             conviction_level=investment.conviction_level,
             purchase_date=investment.purchase_date,
@@ -737,20 +592,20 @@ async def create_investment(investment: InvestmentCreate, db: Session = Depends(
             units=db_investment.units,
             avg_buy_price=db_investment.avg_buy_price,
             current_price=db_investment.current_price,
+            current_price_inr=metrics["current_price_inr"],
             currency=db_investment.currency,
             investment_thesis=db_investment.investment_thesis or "",
             conviction_level=db_investment.conviction_level,
             purchase_date=db_investment.purchase_date,
             last_price_update=db_investment.last_price_update,
-            **metrics
+            **{k: v for k, v in metrics.items() if k != "current_price_inr"}
         )
     except Exception as e:
         db.rollback()
         print(f"Error creating investment: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to create investment: {str(e)}")
 
-# Replace the update_investment endpoint in your main.py with this:
-
+# Rest of the endpoints remain the same...
 @app.put("/api/investments/{investment_id}", response_model=InvestmentResponse)
 async def update_investment(
     investment_id: int, 
@@ -761,15 +616,16 @@ async def update_investment(
     if not db_investment:
         raise HTTPException(status_code=404, detail="Investment not found")
     
-    # Update fields
     for field, value in investment_update.dict(exclude_unset=True).items():
-        setattr(db_investment, field, value)
+        if field in ['units', 'avg_buy_price'] and value is not None:
+            setattr(db_investment, field, float(value))
+        else:
+            setattr(db_investment, field, value)
     
     db_investment.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(db_investment)
     
-    # Use updated metrics calculation
     metrics = calculate_metrics(db_investment)
     
     return InvestmentResponse(
@@ -780,12 +636,13 @@ async def update_investment(
         units=db_investment.units,
         avg_buy_price=db_investment.avg_buy_price,
         current_price=db_investment.current_price,
+        current_price_inr=metrics["current_price_inr"],
         currency=getattr(db_investment, 'currency', 'INR'),
         investment_thesis=db_investment.investment_thesis or "",
         conviction_level=db_investment.conviction_level,
         purchase_date=db_investment.purchase_date,
         last_price_update=db_investment.last_price_update,
-        **metrics
+        **{k: v for k, v in metrics.items() if k != "current_price_inr"}
     )
 
 @app.delete("/api/investments/{investment_id}")
@@ -798,43 +655,35 @@ async def delete_investment(investment_id: int, db: Session = Depends(get_db)):
     db.commit()
     return {"message": "Investment deleted successfully"}
 
-# Replace the get_portfolio_stats endpoint in your main.py with this:
-
 @app.get("/api/portfolio/stats", response_model=PortfolioStats)
 async def get_portfolio_stats(db: Session = Depends(get_db)):
-    """Get portfolio statistics with currency conversion support"""
+    """Get portfolio statistics - all calculations in INR"""
     investments = db.query(Investment).all()
     
-    total_invested_inr = 0
-    current_value_inr = 0
+    total_invested_inr = 0.0
+    current_value_inr = 0.0
     conviction_counts = {"High": 0, "Medium": 0, "Low": 0}
     
-    # Get current USD/INR rate for conversions
-    usd_to_inr_rate = CurrencyConverter.get_usd_to_inr_rate()
-    
     for investment in investments:
-        # Calculate invested amount in INR
-        invested_native = investment.units * investment.avg_buy_price
-        invested_inr = CurrencyConverter.convert_to_inr(invested_native, investment.currency)
-        total_invested_inr += invested_inr
-        
-        # Calculate current value in INR  
-        current_native = investment.units * investment.current_price
-        current_inr = CurrencyConverter.convert_to_inr(current_native, investment.currency)
-        current_value_inr += current_inr
-        
-        # Count conviction levels
+        metrics = calculate_metrics(investment)
+        total_invested_inr += metrics["total_invested_inr"]
+        current_value_inr += metrics["total_value_inr"]
         conviction_counts[investment.conviction_level] += 1
     
-    # Calculate returns
     total_unrealized_pnl_inr = current_value_inr - total_invested_inr
     net_return_percent = (total_unrealized_pnl_inr / total_invested_inr * 100) if total_invested_inr > 0 else 0
     
+    # NaN protection
+    total_invested_inr = total_invested_inr if not (total_invested_inr != total_invested_inr) else 0.0
+    current_value_inr = current_value_inr if not (current_value_inr != current_value_inr) else 0.0
+    total_unrealized_pnl_inr = total_unrealized_pnl_inr if not (total_unrealized_pnl_inr != total_unrealized_pnl_inr) else 0.0
+    net_return_percent = net_return_percent if not (net_return_percent != net_return_percent) else 0.0
+    
     return PortfolioStats(
-        total_invested=total_invested_inr,  # Now in INR
-        current_value=current_value_inr,   # Now in INR  
+        total_invested=total_invested_inr,
+        current_value=current_value_inr,
         net_return_percent=net_return_percent,
-        total_unrealized_pnl=total_unrealized_pnl_inr,  # Now in INR
+        total_unrealized_pnl=total_unrealized_pnl_inr,
         high_conviction_count=conviction_counts["High"],
         medium_conviction_count=conviction_counts["Medium"], 
         low_conviction_count=conviction_counts["Low"],
@@ -852,19 +701,34 @@ async def refresh_prices(db: Session = Depends(get_db)):
 
 # Database migration for existing data
 def migrate_existing_data():
-    """Add currency field to existing investments"""
+    """Fix currency assignments for existing investments"""
     db = SessionLocal()
     try:
-        investments = db.query(Investment).filter(Investment.currency.is_(None)).all()
+        investments = db.query(Investment).all()
         for inv in investments:
+            # Fix currency assignment based on new logic
             if inv.ticker.endswith('.NS') or inv.ticker.endswith('.BO'):
-                inv.currency = "INR"
+                inv.currency = "INR"  # Indian stocks
             elif inv.asset_type.lower() == "crypto":
-                inv.currency = "USD"
+                inv.currency = "INR"  # Crypto buy prices in INR
+            elif inv.asset_type.lower() == "stock":
+                inv.currency = "USD"  # US stocks buy prices in USD
             else:
-                inv.currency = "USD"  # Assume US stocks
+                inv.currency = "INR"  # Default
+            
+            # Ensure numeric fields are properly typed
+            if inv.units is not None:
+                inv.units = float(inv.units)
+            if inv.avg_buy_price is not None:
+                inv.avg_buy_price = float(inv.avg_buy_price)
+            if inv.current_price is not None:
+                inv.current_price = float(inv.current_price)
+        
         db.commit()
         print(f"Migrated {len(investments)} existing investments")
+    except Exception as e:
+        print(f"Migration error: {e}")
+        db.rollback()
     finally:
         db.close()
 
@@ -877,7 +741,3 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"Starting server on port {port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
-
-
-
-
