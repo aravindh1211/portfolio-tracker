@@ -95,11 +95,74 @@ class PortfolioStats(BaseModel):
     total_holdings: int
 
 # Enhanced Price fetching service
+# Enhanced Price fetching service with multiple sources
 class PriceFetcher:
-    @staticmethod
-    async def get_stock_price(ticker: str) -> float:
-        """Fetch stock price using yfinance (supports Indian and US stocks)"""
+    def __init__(self):
+        self.headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive'
+        }
+        
+        # Get Alpha Vantage API key from environment variable
+        self.alpha_vantage_key = os.getenv('ALPHA_VANTAGE_API_KEY', 'demo')
+        
+    def get_price_yahoo_simple(self, ticker: str) -> Optional[float]:
+        """Yahoo Finance - Simple endpoint (least likely to be rate limited)"""
         try:
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1m&range=1d"
+            response = requests.get(url, headers=self.headers, timeout=8)
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                if data.get('chart', {}).get('result'):
+                    result = data['chart']['result'][0]
+                    meta = result.get('meta', {})
+                    current_price = meta.get('regularMarketPrice')
+                    
+                    if current_price:
+                        return float(current_price)
+                        
+                    # Fallback to last close price
+                    quotes = result.get('indicators', {}).get('quote', [{}])
+                    if quotes and quotes[0].get('close'):
+                        closes = [c for c in quotes[0]['close'] if c is not None]
+                        if closes:
+                            return float(closes[-1])
+                            
+        except Exception as e:
+            print(f"Yahoo Simple failed for {ticker}: {e}")
+            
+        return None
+    
+    def get_price_yahoo_search(self, ticker: str) -> Optional[float]:
+        """Yahoo Finance - Search endpoint"""
+        try:
+            url = f"https://query1.finance.yahoo.com/v1/finance/search?q={ticker}"
+            response = requests.get(url, headers=self.headers, timeout=8)
+            
+            if response.status_code == 200:
+                data = response.json()
+                quotes = data.get('quotes', [])
+                
+                for quote in quotes:
+                    if quote.get('symbol') == ticker:
+                        price = quote.get('regularMarketPrice')
+                        if price and price > 0:
+                            return float(price)
+                            
+        except Exception as e:
+            print(f"Yahoo Search failed for {ticker}: {e}")
+            
+        return None
+    
+    def get_price_yfinance_fallback(self, ticker: str) -> Optional[float]:
+        """yfinance as fallback (your original method)"""
+        try:
+            import yfinance as yf
             stock = yf.Ticker(ticker)
             hist = stock.history(period="1d")
             if not hist.empty:
@@ -111,11 +174,143 @@ class PriceFetcher:
                 return float(info['currentPrice'])
             elif 'regularMarketPrice' in info:
                 return float(info['regularMarketPrice'])
-            
-            return 0.0
+                
         except Exception as e:
-            print(f"Error fetching stock price for {ticker}: {e}")
-            return 0.0
+            print(f"yfinance fallback failed for {ticker}: {e}")
+            
+        return None
+    
+    def get_price_alpha_vantage(self, ticker: str) -> Optional[float]:
+        """Alpha Vantage API"""
+        try:
+            if self.alpha_vantage_key == 'demo':
+                print(f"Skipping Alpha Vantage for {ticker} - no API key")
+                return None
+                
+            url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={ticker}&apikey={self.alpha_vantage_key}"
+            response = requests.get(url, timeout=8)
+            
+            if response.status_code == 200:
+                data = response.json()
+                quote = data.get('Global Quote', {})
+                price = quote.get('05. price')
+                
+                if price:
+                    return float(price)
+                    
+        except Exception as e:
+            print(f"Alpha Vantage failed for {ticker}: {e}")
+            
+        return None
+    
+    def get_crypto_price_coingecko(self, ticker: str) -> Optional[float]:
+        """CoinGecko for cryptocurrency prices"""
+        try:
+            # Convert ticker to CoinGecko ID
+            crypto_mapping = {
+                'BTC-USD': 'bitcoin',
+                'ETH-USD': 'ethereum',
+                'ADA-USD': 'cardano',
+                'DOT-USD': 'polkadot',
+                'MATIC-USD': 'matic-network',
+                'SOL-USD': 'solana',
+                'AVAX-USD': 'avalanche-2',
+                'LINK-USD': 'chainlink',
+                'UNI-USD': 'uniswap',
+                'ATOM-USD': 'cosmos',
+                'XRP-USD': 'ripple',
+                'LTC-USD': 'litecoin',
+                'BCH-USD': 'bitcoin-cash',
+                'DOGE-USD': 'dogecoin'
+            }
+            
+            coin_id = crypto_mapping.get(ticker.upper())
+            if not coin_id:
+                return None
+                
+            url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd"
+            response = requests.get(url, timeout=8)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if coin_id in data and 'usd' in data[coin_id]:
+                    return float(data[coin_id]['usd'])
+                    
+        except Exception as e:
+            print(f"CoinGecko failed for {ticker}: {e}")
+            
+        return None
+    
+    def get_price_with_fallbacks(self, ticker: str, asset_type: str = "Stock") -> Optional[float]:
+        """Try multiple sources with fast fallbacks"""
+        
+        # For cryptocurrency, use CoinGecko first
+        if asset_type.lower() == "crypto" or ticker.endswith('-USD'):
+            crypto_price = self.get_crypto_price_coingecko(ticker)
+            if crypto_price:
+                print(f"✅ Got crypto price for {ticker}: ${crypto_price:.2f}")
+                return crypto_price
+        
+        # For stocks, try multiple sources
+        sources = [
+            ("Yahoo Simple", self.get_price_yahoo_simple),
+            ("Yahoo Search", self.get_price_yahoo_search),
+            ("yfinance Fallback", self.get_price_yfinance_fallback),
+            ("Alpha Vantage", self.get_price_alpha_vantage),
+        ]
+        
+        for source_name, source_func in sources:
+            try:
+                print(f"Trying {source_name} for {ticker}...")
+                price = source_func(ticker)
+                
+                if price is not None and price > 0:
+                    print(f"✅ Got price from {source_name}: ${price:.2f}")
+                    return price
+                    
+            except Exception as e:
+                print(f"❌ {source_name} error: {e}")
+            
+            # Very short delay between sources
+            import time
+            time.sleep(0.1)
+        
+        print(f"❌ All sources failed for {ticker}")
+        return 0.0
+
+    # Updated static methods to use the new multi-source fetcher
+    @staticmethod
+    async def get_stock_price(ticker: str) -> float:
+        """Fetch stock price using multi-source fetcher"""
+        fetcher = PriceFetcher()
+        price = fetcher.get_price_with_fallbacks(ticker, "Stock")
+        return price if price is not None else 0.0
+
+    @staticmethod
+    async def get_crypto_price(ticker: str) -> float:
+        """Fetch crypto price using CoinGecko and fallbacks"""
+        fetcher = PriceFetcher()
+        price = fetcher.get_price_with_fallbacks(ticker, "Crypto")
+        return price if price is not None else 0.0
+
+    @staticmethod
+    async def get_mutual_fund_price(ticker: str) -> float:
+        """Fetch mutual fund price using multi-source fetcher"""
+        fetcher = PriceFetcher()
+        price = fetcher.get_price_with_fallbacks(ticker, "Stock")
+        return price if price is not None else 0.0
+
+    @staticmethod
+    async def get_price(asset_type: str, ticker: str) -> float:
+        """Universal price fetcher with multiple fallbacks"""
+        fetcher = PriceFetcher()
+        
+        if asset_type.lower() == "crypto":
+            return fetcher.get_price_with_fallbacks(ticker, "Crypto") or 0.0
+        elif asset_type.lower() in ["stock", "mutual fund"]:
+            return fetcher.get_price_with_fallbacks(ticker, "Stock") or 0.0
+        
+        return 0.0
 
     @staticmethod
     async def get_crypto_price(ticker: str) -> float:
@@ -422,3 +617,4 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"Starting server on port {port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
+
