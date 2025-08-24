@@ -28,6 +28,7 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 # Database Models
+# Updated Database Models (Replace in your main.py)
 class Investment(Base):
     __tablename__ = "investments"
     
@@ -36,8 +37,9 @@ class Investment(Base):
     ticker = Column(String, nullable=False, index=True)
     name = Column(String, nullable=False)
     units = Column(Float, nullable=False)
-    avg_buy_price = Column(Float, nullable=False)
-    current_price = Column(Float, default=0.0)
+    avg_buy_price = Column(Float, nullable=False)  # In original currency (USD for US stocks)
+    current_price = Column(Float, default=0.0)  # In original currency
+    currency = Column(String, default="INR")  # New field: USD, INR
     investment_thesis = Column(Text)
     conviction_level = Column(String, nullable=False)  # High, Medium, Low
     purchase_date = Column(DateTime, nullable=False)
@@ -45,16 +47,14 @@ class Investment(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-# Create tables
-Base.metadata.create_all(bind=engine)
-
-# Pydantic models
+# Updated Pydantic Models (Replace in your main.py)
 class InvestmentCreate(BaseModel):
     asset_type: str
     ticker: str
     name: str
     units: float
     avg_buy_price: float
+    currency: str = "INR"  # New field
     investment_thesis: Optional[str] = ""
     conviction_level: str
     purchase_date: datetime
@@ -62,6 +62,7 @@ class InvestmentCreate(BaseModel):
 class InvestmentUpdate(BaseModel):
     units: Optional[float] = None
     avg_buy_price: Optional[float] = None
+    currency: Optional[str] = None  # New field
     investment_thesis: Optional[str] = None
     conviction_level: Optional[str] = None
 
@@ -71,15 +72,18 @@ class InvestmentResponse(BaseModel):
     ticker: str
     name: str
     units: float
-    avg_buy_price: float
-    current_price: float
+    avg_buy_price: float  # Original currency
+    current_price: float  # Original currency
+    currency: str  # New field
     investment_thesis: str
     conviction_level: str
     purchase_date: datetime
     last_price_update: datetime
-    total_value: float
-    unrealized_pnl: float
+    total_value_inr: float  # Always in INR
+    total_invested_inr: float  # Always in INR
+    unrealized_pnl_inr: float  # Always in INR
     unrealized_pnl_percent: float
+    usd_to_inr_rate: Optional[float] = None  # Current conversion rate
 
     class Config:
         from_attributes = True
@@ -617,4 +621,5 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"Starting server on port {port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
+
 
