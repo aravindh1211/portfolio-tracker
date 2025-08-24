@@ -278,6 +278,36 @@ function App() {
           <div className="flex gap-2 sm:gap-4 flex-wrap">
             {/* Theme Toggle */}
             <button
+              onClick={() => setDarkMode(!darkMode)}
+              className={`flex items-center gap-2 px-3 py-2 rounded-lg transition-all duration-200 ${
+                darkMode 
+                  ? 'bg-gray-700 hover:bg-gray-600 text-yellow-400 hover:text-yellow-300' 
+                  : 'bg-gray-200 hover:bg-gray-300 text-gray-700 hover:text-gray-800'
+              }`}
+            >
+              {darkMode ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
+              <span className="hidden sm:inline">{darkMode ? 'Light' : 'Dark'}</span>
+            </button>
+
+            <button
+              onClick={handleRefreshPrices}
+              disabled={refreshing}
+              className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded-lg disabled:opacity-50 transition-all duration-200"
+            >
+              <RefreshCw className={`w-5 h-5 ${refreshing ? 'animate-spin' : ''}`} />
+              <span className="hidden sm:inline">{refreshing ? 'Updating...' : 'Refresh'}</span>
+            </button>
+
+            <button
+              onClick={exportToCSV}
+              disabled={investments.length === 0}
+              className="flex items-center gap-2 bg-green-600 hover:bg-green-700 text-white px-3 py-2 rounded-lg disabled:opacity-50 transition-all duration-200"
+            >
+              <Download className="w-5 h-5" />
+              <span className="hidden sm:inline">Export</span>
+            </button>
+
+            <button
               onClick={() => setShowAddForm(true)}
               className="flex items-center gap-2 bg-purple-600 hover:bg-purple-700 text-white px-3 py-2 rounded-lg transition-all duration-200"
             >
@@ -630,34 +660,4 @@ function App() {
   );
 }
 
-export default App; setDarkMode(!darkMode)}
-              className={`flex items-center gap-2 px-3 py-2 rounded-lg transition-all duration-200 ${
-                darkMode 
-                  ? 'bg-gray-700 hover:bg-gray-600 text-yellow-400 hover:text-yellow-300' 
-                  : 'bg-gray-200 hover:bg-gray-300 text-gray-700 hover:text-gray-800'
-              }`}
-            >
-              {darkMode ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
-              <span className="hidden sm:inline">{darkMode ? 'Light' : 'Dark'}</span>
-            </button>
-
-            <button
-              onClick={handleRefreshPrices}
-              disabled={refreshing}
-              className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded-lg disabled:opacity-50 transition-all duration-200"
-            >
-              <RefreshCw className={`w-5 h-5 ${refreshing ? 'animate-spin' : ''}`} />
-              <span className="hidden sm:inline">{refreshing ? 'Updating...' : 'Refresh'}</span>
-            </button>
-
-            <button
-              onClick={exportToCSV}
-              disabled={investments.length === 0}
-              className="flex items-center gap-2 bg-green-600 hover:bg-green-700 text-white px-3 py-2 rounded-lg disabled:opacity-50 transition-all duration-200"
-            >
-              <Download className="w-5 h-5" />
-              <span className="hidden sm:inline">Export</span>
-            </button>
-
-            <button
-              onClick={() =>
+export default App;
